@@ -1372,16 +1372,14 @@ export class Proxy implements IProxy {
                 clientToProxyWebSocket.readyState === WebSocket.CLOSED &&
                 proxyToServerWebSocket.readyState === WebSocket.OPEN
               ) {
-                code === 1005
-                  ? proxyToServerWebSocket.close()
-                  : proxyToServerWebSocket.close(code, message);
+                if (code === 1005) proxyToServerWebSocket.close();
+                else proxyToServerWebSocket.close(code, message);
               } else if (
                 proxyToServerWebSocket.readyState === WebSocket.CLOSED &&
                 clientToProxyWebSocket.readyState === WebSocket.OPEN
               ) {
-                code === 1005
-                  ? proxyToServerWebSocket.close()
-                  : clientToProxyWebSocket.close(code, message);
+                if (code === 1005) proxyToServerWebSocket.close();
+                else clientToProxyWebSocket.close(code, message);
               }
             } catch (err: any) {
               return self._onWebSocketError(ctx, err);
