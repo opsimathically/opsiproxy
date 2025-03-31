@@ -1,0 +1,11 @@
+.dist/
+docs/
+node_modules/
+src/
+.git/
+.vscode/
+tests/
+eslint.config.mjs
+tsconfig.json
+.prettierrc
+.github/

@@ -1,0 +1,50 @@
+{
+  "name": "@opsimathically/opsiproxy",
+  "version": "1.0.0",
+  "description": "A proxy set that allows proxying multiple types of data (HTTP(s), sockets, tls, etc)",
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsup src/index.ts --format cjs,esm --dts",
+    "test": "ts-node -r tsconfig-paths/register test/opsiproxy.test.ts",
+    "docs": "typedoc"
+  },
+  "keywords": [
+    "proxy",
+    "socks",
+    "http",
+    "https",
+    "tls",
+    "ssl"
+  ],
+  "homepage": "https://github.com/opsimathically/opsiproxy",
+  "devDependencies": {
+    "@types/async": "^3.2.24",
+    "@types/node": "^22.13.13",
+    "@types/semaphore": "^1.1.4",
+    "@types/ws": "^8.18.0",
+    "@types/wtfnode": "^0.7.3",
+    "esbuild": "^0.25.0",
+    "eslint": "^9.20.1",
+    "globals": "^15.14.0",
+    "prettier": "^3.5.0",
+    "ts-node": "^10.9.2",
+    "tsconfig-paths": "^4.2.0",
+    "tsup": "^8.3.6",
+    "typedoc": "^0.28.1",
+    "typedoc-plugin-markdown": "^4.6.0",
+    "typescript": "^5.7.3",
+    "typescript-eslint": "^8.24.0",
+    "wtfnode": "^0.10.0"
+  },
+  "author": "Jason Medeiros",
+  "license": "MIT",
+  "dependencies": {
+    "async": "^3.2.6",
+    "fast-equals": "^5.2.2",
+    "semaphore": "^1.1.0",
+    "uuid": "^11.1.0",
+    "ws": "^8.18.1"
+  }
+}
