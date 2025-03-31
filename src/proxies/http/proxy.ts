@@ -967,11 +967,14 @@ export class Proxy implements IProxy {
     } else {
       url = upgradeReq.url;
     }
-    const proxyToServerHeaders = {};
+    const proxyToServerHeaders: http_headers_t = {};
     const clientToProxyHeaders = upgradeReq.headers;
     for (const header in clientToProxyHeaders) {
+      const header_data = clientToProxyHeaders[header];
+      if (typeof header !== 'string') continue;
+      if (typeof header_data !== 'string') continue;
       if (header.indexOf('sec-websocket') !== 0) {
-        proxyToServerHeaders[header] = clientToProxyHeaders[header];
+        proxyToServerHeaders[header] = header_data;
       }
     }
 
