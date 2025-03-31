@@ -1429,14 +1429,16 @@ export class Proxy implements IProxy {
     const self = this;
     async.forEach(
       this.onRequestDataHandlers.concat(ctx.onRequestDataHandlers),
-      (fn, callback: OnRequestDataCallback) =>
+      (fn, callback: OnRequestDataCallback) => {
+        if (!Buffer.isBuffer(chunk)) return;
         fn(ctx, chunk, (err, newChunk) => {
           if (err) {
             return callback(err);
           }
           chunk = newChunk;
           return callback(null, newChunk);
-        }),
+        });
+      },
       (err) => {
         if (err) {
           return self._onError('ON_REQUEST_DATA_ERROR', ctx, err);
