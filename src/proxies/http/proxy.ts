@@ -84,24 +84,43 @@ type http_headers_t = Record<string, string>;
  * WebSocket and utilize that, so that upgradeReq can be preserved.
  *
  * Change:
- * Update callback additions.
+ * Update/remove callback additions.  My idea for these would be we define a plugin that
+ * contains some or all of the following.  These would be executed on a context matching
+ * method.
  *
- * onError
- * onConnect
- * onRequestHeaders
- * onRequest
- * onWebSocketConnection
- * onWebSocketSend
- * onWebSocketMessage
- * onWebSocketFrame
- * onWebSocketClose
- * onWebSocketError
- * onRequestData
- * onRequestEnd
- * onResponse
- * onResponseHeaders
- * onResponseData
- * onResponseEnd
+ * [] onError
+ * [] onConnect
+ * [] onRequestHeaders
+ * [] onRequest
+ * [] onWebSocketConnection
+ * [] onWebSocketSend
+ * [] onWebSocketMessage
+ * [] onWebSocketFrame
+ * [] onWebSocketClose
+ * [] onWebSocketError
+ * [] onRequestData
+ * [] onRequestEnd
+ * [] onResponse
+ * [] onResponseHeaders
+ * [] onResponseData
+ * [] onResponseEnd
+ *
+ * Change:
+ * Update handlers to be more typed, extended with new features.
+ * [] onConnectHandlers
+ * [] onRequestHandlers
+ * [] onRequestHeadersHandlers
+ * [] onWebSocketConnectionHandlers
+ * [] onWebSocketFrameHandlers
+ * [] onWebSocketCloseHandlers
+ * [] onWebSocketErrorHandlers
+ * [] onErrorHandlers
+ * [] onRequestDataHandlers
+ * [] onRequestEndHandlers
+ * [] onResponseHandlers
+ * [] onResponseHeadersHandlers
+ * [] onResponseDataHandlers
+ * [] onResponseEndHandlers
  *
  * PERSONAL DESIRED CHANGES
  * ------------------------
