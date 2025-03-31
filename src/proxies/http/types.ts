@@ -1,9 +1,10 @@
-import http = require("http");
-import https = require("https");
-import type CA from "../lib/ca";
-import type WebSocket from "ws";
-import type { Server } from "https";
-import type { WebSocket as WebSocketType, WebSocketServer } from "ws";
+/* eslint-disable @typescript-eslint/no-explicit-any */
+import http from 'node:http';
+import https from 'node:https';
+import type CA from '@src/proxies/http/ca';
+import type WebSocket from 'ws';
+import type { Server } from 'https';
+import type { WebSocket as WebSocketType, WebSocketServer } from 'ws';
 
 export interface IProxyStatic {
   (): IProxy;
@@ -103,7 +104,10 @@ export type OnCertificateRequiredCallback = (
   error: MaybeError,
   certDetails: ICertDetails
 ) => void;
-export type OnRequestDataCallback = (error?: MaybeError, chunk?: Buffer) => void;
+export type OnRequestDataCallback = (
+  error?: MaybeError,
+  chunk?: Buffer
+) => void;
 export type OnRequestDataParams = (
   ctx: IContext,
   chunk: Buffer,
@@ -117,7 +121,7 @@ export type OnErrorParams = (
 export type OnConnectParams = (
   req: http.IncomingMessage,
   // eslint-disable-next-line @typescript-eslint/consistent-type-imports
-  socket: import("stream").Duplex,
+  socket: import('stream').Duplex,
   head: any,
   callback: ErrorCallback
 ) => void;
@@ -294,19 +298,19 @@ export type IContext = ICallbacks &
     /** undocumented, allows adjusting the request in callbacks (such as .onRequest()) before sending  upstream (to proxy or target host)..
      * FYI these values seem pre-populated with defaults based on the request, you can modify them to change behavior. */
     proxyToServerRequestOptions:
-    | undefined
-    | {
-      /** ex: "GET" */
-      method: string;
-      /** ex: "/success.txt" */
-      path: string;
+      | undefined
+      | {
+          /** ex: "GET" */
+          method: string;
+          /** ex: "/success.txt" */
+          path: string;
 
-      /** example: "detectportal.firefox.com" */
-      host: string;
-      port: string | number | null | undefined;
-      headers: { [key: string]: string };
-      agent: http.Agent;
-    };
+          /** example: "detectportal.firefox.com" */
+          host: string;
+          port: string | number | null | undefined;
+          headers: { [key: string]: string };
+          agent: http.Agent;
+        };
 
     onRequestHandlers: OnRequestParams[];
     onResponseHandlers: OnRequestParams[];

@@ -65,62 +65,7 @@ interface WebSocketFlags {
 }
 
 type http_headers_t = Record<string, string>;
-/**
- * My History With This Project:
- * About six months back I didn't know typescript well.  As a result I took this entire project and mostly
- * ported it to javascript to utilize for my own internal security testing tools.  It worked well, but
- * eventually I came to my senses and learned typescript.  Now with that new knowledge I want to approach
- * this excellent minded project and retrofit my javascript changes and subsystems into a public version
- * of my existing tooling.
- *
- * Change notes:
- * Due to changes in libraries, common coding practices, and my own personal desires I'll be modifying
- * this file fairly drastically.  I have several goals in mind:
- *
- * REQUIRED CHANGES:
- * ------------------------
- * Change:
- * ws.upgradeReq no longer exists.  It was deemed insecure.  We need to as a result, extend a type from
- * WebSocket and utilize that, so that upgradeReq can be preserved.
- *
- * Change:
- * Update callback additions.
- *
- * onError
- * onConnect
- * onRequestHeaders
- * onRequest
- * onWebSocketConnection
- * onWebSocketSend
- * onWebSocketMessage
- * onWebSocketFrame
- * onWebSocketClose
- * onWebSocketError
- * onRequestData
- * onRequestEnd
- * onResponse
- * onResponseHeaders
- * onResponseData
- * onResponseEnd
- *
- * PERSONAL DESIRED CHANGES
- * ------------------------
- * Desired Change:
- * All relevant callbacks should be asynchronous/awaited on.
- *
- * Why:
- * My interests in this project are to utilize it as an investigative/collection/security testing tool.  That means
- * that a lot of data comparissons will have to be made with backends such as databases.  For example,
- * checking if a database record exists and terminating or modifying a request/response based on the contents
- * of that database record.  This is easily done with async/await, but not so much with synchronous callbacks.
- *
- * Desired Change:
- * A more robust plugin system.
- *
- * Why:
- * To integrate multiple tools and systems based on proxy context.
- *
- */
+
 export class Proxy implements IProxy {
   ca!: ca;
   connectRequests: Record<string, http.IncomingMessage> = {};
