@@ -1485,14 +1485,17 @@ export class Proxy implements IProxy {
   ) {
     async.forEach(
       this.onResponseDataHandlers.concat(ctx.onResponseDataHandlers),
-      (fn, callback: OnRequestDataCallback) =>
+      (fn, callback: OnRequestDataCallback) => {
+        if (!Buffer.isBuffer(chunk)) return;
         fn(ctx, chunk, (err, newChunk) => {
           if (err) {
             return callback(err);
           }
+
           chunk = newChunk;
           return callback(null, newChunk);
-        }),
+        });
+      },
       (err) => {
         if (err) {
           return this._onError('ON_RESPONSE_DATA_ERROR', ctx, err);
