@@ -1233,11 +1233,13 @@ export class Proxy implements IProxy {
       });
       ctx.proxyToClientResponse.end('Bad request: Host missing...', 'utf-8');
     } else {
-      const headers = {};
+      const headers: http_headers_t = {};
       for (const h in ctx.clientToProxyRequest.headers) {
         // don't forward proxy-headers
         if (!/^proxy-/i.test(h)) {
-          headers[h] = ctx.clientToProxyRequest.headers[h];
+          const header = ctx.clientToProxyRequest.headers[h];
+          if (typeof header === 'string')
+            if (typeof h === 'string') headers[h] = header;
         }
       }
       if (this.options.forceChunkedRequest) {
