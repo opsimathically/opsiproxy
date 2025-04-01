@@ -1,7 +1,16 @@
+/* eslint-disable no-debugger */
+/* eslint-disable no-empty */
 /* eslint-disable @typescript-eslint/no-unused-vars */
 /* eslint-disable @typescript-eslint/ban-ts-comment */
 /* eslint-disable @typescript-eslint/no-this-alias */
 /* eslint-disable @typescript-eslint/no-explicit-any */
+
+import IterAsync from '@opsimathically/iterasync';
+import { OpsiproxyRequestContext } from '@src/proxies/http/contexts/OpsiproxyRequestContext.class';
+
+import { constants } from 'fs';
+import { access } from 'fs/promises';
+import * as fs_promises from 'fs/promises';
 import async from 'async';
 import type { AddressInfo } from 'net';
 import net from 'net';
@@ -56,6 +65,31 @@ import type stream from 'node:stream';
 import { SecureContextOptions } from 'tls';
 export { wildcard, gunzip };
 
+type opsiproxy_plugin_info_t = {
+  name: string;
+  description: string;
+};
+
+type opsiproxy_plugin_t = {
+  info: opsiproxy_plugin_info_t;
+  onError?(): Promise<any>;
+  onConnect?(): Promise<any>;
+  onRequestHeaders?(): Promise<any>;
+  onRequest?(): Promise<any>;
+  onWebSocketConnection?(): Promise<any>;
+  onWebSocketSend?(): Promise<any>;
+  onWebSocketMessage?(): Promise<any>;
+  onWebSocketFrame?(): Promise<any>;
+  onWebSocketClose?(): Promise<any>;
+  onWebSocketError?(): Promise<any>;
+  onRequestData?(): Promise<any>;
+  onRequestEnd?(): Promise<any>;
+  onResponse?(): Promise<any>;
+  onResponseHeaders?(): Promise<any>;
+  onResponseData?(): Promise<any>;
+  onResponseEnd?(): Promise<any>;
+};
+
 type HandlerType<T extends (...args: any[]) => any> = Array<Parameters<T>[0]>;
 interface WebSocketFlags {
   mask?: boolean | undefined;
@@ -63,6 +97,34 @@ interface WebSocketFlags {
   compress?: boolean | undefined;
   fin?: boolean | undefined;
 }
+
+interface opsiproxy_websocket_i extends WebSocket {
+  upgradeReq?: IncomingMessage;
+}
+
+type opsiproxy_options_t = {
+  // The port or named socket to listen on (default: 8080).
+  httpPort: number;
+  // The hostname or local address to listen on.
+  host: string;
+  // Path to the certificates cache directory (default: process.cwd() + '/.http-mitm-proxy')
+  sslCaDir: string;
+  // enable HTTP persistent connection
+  keepAlive: boolean;
+  // The number of milliseconds of inactivity before a socket is presumed to have timed out. Defaults to no timeout.
+  timeout: number;
+  // The http.Agent to use when making http requests. Useful for chaining proxys. (default: internal Agent)
+  httpAgent: http.Agent;
+  // The https.Agent to use when making https requests. Useful for chaining proxys. (default: internal Agent)
+  httpsAgent: https.Agent;
+  // force use of SNI by the client. Allow node-http-mitm-proxy to handle all HTTPS requests with a single internal server.
+  forceSNI: boolean;
+  // The port or named socket for https server to listen on. (forceSNI must be enabled)
+  httpsPort: number;
+  // Setting this option will remove the content-length from the proxy to server request, forcing chunked encoding
+  forceChunkedRequest: boolean;
+  plugins: opsiproxy_plugin_t[];
+};
 
 type http_headers_t = Record<string, string>;
 /**
@@ -140,7 +202,7 @@ type http_headers_t = Record<string, string>;
  * To integrate multiple tools and systems based on proxy context.
  *
  */
-export class Proxy implements IProxy {
+class OpsiHTTPProxy {
   ca!: ca;
   connectRequests: Record<string, http.IncomingMessage> = {};
   forceSNI!: boolean;
@@ -152,6 +214,11 @@ export class Proxy implements IProxy {
   httpsPort?: number;
   httpsServer: Server | undefined;
   keepAlive!: boolean;
+
+  // opsiproxy plugins
+  plugins: opsiproxy_plugin_t[] = [];
+
+  /*
   onConnectHandlers: HandlerType<IProxy['onConnect']>;
   onErrorHandlers: HandlerType<IProxy['onError']>;
   onRequestDataHandlers: HandlerType<IProxy['onRequestData']>;
@@ -166,7 +233,8 @@ export class Proxy implements IProxy {
   onWebSocketConnectionHandlers: HandlerType<IProxy['onWebSocketConnection']>;
   onWebSocketErrorHandlers: HandlerType<IProxy['onWebSocketError']>;
   onWebSocketFrameHandlers: HandlerType<IProxy['onWebSocketFrame']>;
-  options!: IProxyOptions;
+  */
+  options!: opsiproxy_options_t;
   responseContentPotentiallyModified: boolean;
   sslCaDir!: string;
   sslSemaphores: Record<string, semaphore.Semaphore> = {};
@@ -177,7 +245,9 @@ export class Proxy implements IProxy {
   static wildcard = wildcard;
   static gunzip = gunzip;
 
-  constructor() {
+  constructor(params: opsiproxy_options_t) {
+    this.options = params;
+
     /*
     this.onConnectHandlers = [];
     this.onRequestHandlers = [];
@@ -197,79 +267,255 @@ export class Proxy implements IProxy {
     this.responseContentPotentiallyModified = false;
   }
 
-  listen(options: IProxyOptions, callback: ErrorCallback = () => undefined) {
-    const self = this;
+  // check if something is a writable directory
+  async isWritableDirectory(p: string): Promise<boolean> {
+    try {
+      const resolvedPath = path.resolve(p);
+      const stats = await fs_promises.stat(resolvedPath);
+      if (!stats.isDirectory()) return false;
+      await fs_promises.access(resolvedPath, constants.W_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  }
 
-    this.options = options || {};
-    this.httpPort = options.port || options.port === 0 ? options.port : 8080;
-    this.httpHost = options.host || 'localhost';
-    this.timeout = options.timeout || 0;
-    this.keepAlive = !!options.keepAlive;
-    this.httpAgent =
+  async listen() {
+    // set self reference
+    const opsiproxy_ref = this;
+
+    // set options
+    const options = opsiproxy_ref.options;
+    opsiproxy_ref.httpPort = options.httpPort;
+
+    opsiproxy_ref.httpHost = options.host;
+    opsiproxy_ref.timeout = options.timeout;
+    opsiproxy_ref.keepAlive = options.keepAlive;
+
+    opsiproxy_ref.httpAgent =
       typeof options.httpAgent !== 'undefined'
         ? options.httpAgent
         : new http.Agent({ keepAlive: this.keepAlive });
-    this.httpsAgent =
-      typeof options.httpsAgent !== 'undefined'
-        ? options.httpsAgent
-        : new https.Agent({ keepAlive: this.keepAlive });
-    this.forceSNI = !!options.forceSNI;
-    if (this.forceSNI) {
-      console.info('SNI enabled. Clients not supporting SNI may fail');
+
+    opsiproxy_ref.httpsAgent = options.httpsAgent;
+
+    opsiproxy_ref.forceSNI = options.forceSNI;
+
+    // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+    // %%% Certificate Authority %%%%%%%%%%%%%%%%%%%%%
+    // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+    // always ensure the ca directory exists
+    opsiproxy_ref.sslCaDir = options.sslCaDir;
+    if (!(await opsiproxy_ref.isWritableDirectory(opsiproxy_ref.sslCaDir))) {
+      throw new Error('opsiproxy_ssl_ca_dir_is_invalid');
     }
-    this.httpsPort = this.forceSNI ? options.httpsPort : undefined;
-    this.sslCaDir =
-      options.sslCaDir || path.resolve(process.cwd(), '.http-mitm-proxy');
-    ca.create(this.sslCaDir, (err: Error | null | undefined, ca: ca) => {
-      if (err) {
-        return callback(err);
+
+    // attempt to create the certificate authority instance
+    const certificate_authority: ca = await new Promise(function (
+      resolve,
+      reject
+    ) {
+      ca.create(
+        opsiproxy_ref.sslCaDir,
+        (err: Error | null | undefined, ca: ca) => {
+          if (err) {
+            reject(err);
+            return;
+          }
+          resolve(ca);
+        }
+      );
+    });
+
+    opsiproxy_ref.ca = certificate_authority;
+    opsiproxy_ref.sslServers = {};
+    opsiproxy_ref.sslSemaphores = {};
+    opsiproxy_ref.connectRequests = {};
+
+    // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+    // %%% HTTP Server %%%%%%%%%%%%%%%%%%%%%%%%
+    // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+    opsiproxy_ref.httpServer = http.createServer();
+    opsiproxy_ref.httpServer!.timeout = opsiproxy_ref.timeout;
+
+    // handle client->opsiproxy connections
+    // self.httpServer!.on('connect', self._onHttpServerConnect.bind(self));
+    opsiproxy_ref.httpServer!.on(
+      'connect',
+      (req: IncomingMessage, socket: stream.Duplex, head: Buffer) => {
+        debugger;
       }
-      self.ca = ca;
-      self.sslServers = {};
-      self.sslSemaphores = {};
-      self.connectRequests = {};
-      self.httpServer = http.createServer();
-      self.httpServer!.timeout = self.timeout;
-      self.httpServer!.on('connect', self._onHttpServerConnect.bind(self));
-      self.httpServer!.on(
-        'request',
-        self._onHttpServerRequest.bind(self, false)
-      );
-      self.wsServer = new WebSocketServer({ server: self.httpServer });
-      self.wsServer.on(
-        'error',
-        self._onError.bind(self, 'HTTP_SERVER_ERROR', null)
-      );
-      self.wsServer.on('connection', (ws, req) => {
+    );
+
+    // handle client->opsiproxy requests
+    // self.httpServer!.on('request', self._onHttpServerRequest.bind(self, false));
+    opsiproxy_ref.httpServer!.on(
+      'request',
+      (
+        req: IncomingMessage,
+        res: ServerResponse<IncomingMessage> & { req: IncomingMessage }
+      ) => {
+        // create new context and immediately pause the request
+        const ctx = new OpsiproxyRequestContext();
+        ctx.clientToProxyRequest = req;
+        ctx.clientToProxyRequest.pause();
+        ctx.isSSL = false;
+
+        ctx.proxyToClientResponse = res;
+        ctx.responseContentPotentiallyModified = false;
+
+        const hostPort = OpsiHTTPProxy.parseHostAndPort(
+          ctx.clientToProxyRequest,
+          ctx.isSSL ? 443 : 80
+        );
+
+        // ensure hostPort was parsed ok
+        if (!hostPort) {
+          ctx.clientToProxyRequest.resume();
+          ctx.proxyToClientResponse.writeHead(400, {
+            'Content-Type': 'text/html; charset=utf-8'
+          });
+          ctx.proxyToClientResponse.end(
+            'Bad request: Host missing...',
+            'utf-8'
+          );
+          return;
+        }
+
+        const headers: http_headers_t = {};
+        for (const h in ctx.clientToProxyRequest.headers) {
+          // don't forward proxy-headers
+          if (!/^proxy-/i.test(h)) {
+            const header = ctx.clientToProxyRequest.headers[h];
+            if (typeof header === 'string')
+              if (typeof h === 'string') headers[h] = header;
+          }
+        }
+        if (this.options.forceChunkedRequest) {
+          delete headers['content-length'];
+        }
+
+        ctx.proxyToServerRequestOptions = {
+          method: ctx.clientToProxyRequest.method!,
+          path: ctx.clientToProxyRequest.url!,
+          host: hostPort.host,
+          port: hostPort.port,
+          headers,
+          agent: ctx.isSSL ? opsiproxy_ref.httpsAgent : opsiproxy_ref.httpAgent
+        };
+
+        debugger;
+      }
+    );
+
+    // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+    // %%% WebSocket Server %%%%%%%%%%%%%%%%%%%
+    // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+    opsiproxy_ref.wsServer = new WebSocketServer({
+      server: opsiproxy_ref.httpServer
+    });
+
+    /*
+    self.wsServer.on(
+      'error',
+      self._onError.bind(self, 'HTTP_SERVER_ERROR', null)
+    );
+    */
+    opsiproxy_ref.wsServer.on('error', (error: Error) => {
+      debugger;
+    });
+
+    /*
+    self.wsServer.on(
+      'connection',
+      (ws: opsiproxy_websocket_i, req: IncomingMessage) => {
         ws.upgradeReq = req;
         self._onWebSocketServerConnect.call(self, false, ws, req);
-      });
-      const listenOptions = {
-        host: self.httpHost,
-        port: self.httpPort
-      };
-      if (self.forceSNI) {
-        // start the single HTTPS server now
-        self._createHttpsServer({}, (port, httpsServer, wssServer) => {
-          console.debug(`https server started on ${port}`);
-          self.httpsServer = httpsServer;
-          self.wssServer = wssServer;
-          self.httpsPort = port;
-          self.httpServer!.listen(listenOptions, () => {
-            self.httpPort = (self.httpServer!.address() as AddressInfo).port;
-            callback();
-          });
-        });
-      } else {
-        self.httpServer.listen(listenOptions, () => {
-          self.httpPort = (self.httpServer!.address() as AddressInfo).port;
-          callback();
-        });
       }
+    );
+    */
+    opsiproxy_ref.wsServer.on(
+      'connection',
+      (ws: opsiproxy_websocket_i, req: IncomingMessage) => {
+        debugger;
+      }
+    );
+
+    const listenOptions = {
+      host: opsiproxy_ref.httpHost,
+      port: opsiproxy_ref.httpPort
+    };
+
+    /*
+    if (self.forceSNI) {
+      // start the single HTTPS server now
+      self._createHttpsServer({}, (port, httpsServer, wssServer) => {
+        console.debug(`https server started on ${port}`);
+        self.httpsServer = httpsServer;
+        self.wssServer = wssServer;
+        self.httpsPort = port;
+        self.httpServer!.listen(listenOptions, () => {
+          self.httpPort = (self.httpServer!.address() as AddressInfo).port;
+        });
+      });
+    } else {
+     */
+
+    await new Promise(function (resolve, reject) {
+      if (!opsiproxy_ref.httpServer) {
+        reject('opsiproxy_http_server_not_present');
+        return;
+      }
+      opsiproxy_ref.httpServer.listen(listenOptions, () => {
+        opsiproxy_ref.httpPort = (
+          opsiproxy_ref.httpServer!.address() as AddressInfo
+        ).port;
+        resolve(true);
+      });
     });
-    return this;
+    /*
+    }
+    */
+
+    return true;
   }
 
+  async close() {
+    // set self reference
+    const opsiproxy_ref = this;
+
+    // close/remove http server
+    opsiproxy_ref.httpServer!.close();
+    delete opsiproxy_ref.httpServer;
+
+    // close/remove https server
+    if (opsiproxy_ref.httpsServer) {
+      opsiproxy_ref.httpsServer.close();
+
+      delete opsiproxy_ref.httpsServer;
+      delete opsiproxy_ref.wssServer;
+
+      opsiproxy_ref.sslServers = {};
+    }
+
+    // close/remove sslServers
+    if (this.sslServers) {
+      for (const srvName of Object.keys(opsiproxy_ref.sslServers)) {
+        const server = opsiproxy_ref.sslServers[srvName].server;
+        if (server) {
+          server.close();
+        }
+        delete opsiproxy_ref.sslServers[srvName];
+      }
+    }
+
+    return true;
+  }
+
+  /*
   _createHttpsServer(
     options: ServerOptions & { hosts?: string[] },
     callback: ICreateServerCallback
@@ -277,20 +523,24 @@ export class Proxy implements IProxy {
     const httpsServer = https.createServer({
       ...options
     } as ServerOptions);
+
     httpsServer.timeout = this.timeout;
+
     httpsServer.on(
       'error',
       this._onError.bind(this, 'HTTPS_SERVER_ERROR', null)
     );
+
     httpsServer.on(
       'clientError',
       this._onError.bind(this, 'HTTPS_CLIENT_ERROR', null)
     );
+
     httpsServer.on('connect', this._onHttpServerConnect.bind(this));
     httpsServer.on('request', this._onHttpServerRequest.bind(this, true));
     const self = this;
     const wssServer = new WebSocketServer({ server: httpsServer });
-    wssServer.on('connection', (ws, req) => {
+    wssServer.on('connection', (ws: opsiproxy_websocket_i, req) => {
       ws.upgradeReq = req;
       self._onWebSocketServerConnect.call(self, true, ws, req);
     });
@@ -318,27 +568,7 @@ export class Proxy implements IProxy {
       }
     });
   }
-
-  close() {
-    this.httpServer!.close();
-    delete this.httpServer;
-    if (this.httpsServer) {
-      this.httpsServer.close();
-      delete this.httpsServer;
-      delete this.wssServer;
-      this.sslServers = {};
-    }
-    if (this.sslServers) {
-      for (const srvName of Object.keys(this.sslServers)) {
-        const server = this.sslServers[srvName].server;
-        if (server) {
-          server.close();
-        }
-        delete this.sslServers[srvName];
-      }
-    }
-    return this;
-  }
+  */
 
   // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
   // %%% Handler Definitions %%%%%%%%%%%%%%%%%%%%%%
@@ -457,6 +687,7 @@ export class Proxy implements IProxy {
   }
   */
 
+  /*
   // Since node 0.9.9, ECONNRESET on sockets are no longer hidden
   _onSocketError(socketDescription: string, err: NodeJS.ErrnoException) {
     if (err.errno === -54 || err.code === 'ECONNRESET') {
@@ -465,12 +696,14 @@ export class Proxy implements IProxy {
       this._onError(`${socketDescription}_ERROR`, null, err);
     }
   }
+  */
 
-  _onHttpServerConnect(
+  async _onHttpServerConnect(
     req: http.IncomingMessage,
     socket: stream.Duplex,
     head: Buffer
   ) {
+    /*
     const self = this;
 
     socket.on(
@@ -478,10 +711,45 @@ export class Proxy implements IProxy {
       self._onSocketError.bind(self, 'CLIENT_TO_PROXY_SOCKET')
     );
 
+    const ia = new IterAsync<opsiproxy_plugin_t, any>({
+      concurrency: 10,
+      extra: {},
+      gen: async function* () {
+        for (let idx = 0; idx < self.plugins.length; idx++) {
+          yield self.plugins[idx];
+        }
+      },
+      processor: async function (
+        this: IterAsync<opsiproxy_plugin_t, any>,
+        item: opsiproxy_plugin_t
+      ) {}
+    });
+
+    await ia.run();
+    
+
+    if (!head || head.length === 0) {
+      socket.once(
+        'data',
+        self._onHttpServerConnectData.bind(self, req, socket)
+      );
+      socket.write('HTTP/1.1 200 OK\r\n');
+      if (self.keepAlive && req.headers['proxy-connection'] === 'keep-alive') {
+        socket.write('Proxy-Connection: keep-alive\r\n');
+        socket.write('Connection: keep-alive\r\n');
+      }
+      return socket.write('\r\n');
+    } else {
+      self._onHttpServerConnectData(req, socket, head);
+    }
+    */
+    /*
     // you can forward HTTPS request directly by adding custom CONNECT method handler
     return async.forEach(
       self.onConnectHandlers,
-      (fn, callback) => fn.call(self, req, socket, head, callback),
+      (fn, callback) => {
+        fn.call(self, req, socket, head, callback);
+      },
       (err) => {
         if (err) {
           return self._onError('ON_CONNECT_ERROR', null, err);
@@ -507,9 +775,167 @@ export class Proxy implements IProxy {
         }
       }
     );
+    */
   }
 
-  _onHttpServerConnectData(
+  /*
+  async makeConnection(
+    req: http.IncomingMessage,
+    socket: stream.Duplex,
+    head: Buffer,
+    port: number
+  ) {
+    const self = this;
+
+    // open a TCP connection to the remote host
+    const conn = net.connect(
+      {
+        port,
+        host: '0.0.0.0',
+        allowHalfOpen: true
+      },
+
+      () => {
+        // create a tunnel between the two hosts
+        const connectKey = `${conn.localPort}:${conn.remotePort}`;
+        self.connectRequests[connectKey] = req;
+        const cleanupFunction = () => {
+          delete self.connectRequests[connectKey];
+        };
+        conn.on('close', () => {
+          cleanupFunction();
+          socket.destroy();
+        });
+        socket.on('close', () => {
+          conn.destroy();
+        });
+        conn.on('error', (err) => {
+          console.error('Connection error:');
+          console.error(err);
+          conn.destroy();
+        });
+        socket.on('error', (err) => {
+          console.error('Socket error:');
+          console.error(err);
+        });
+        socket.pipe(conn);
+        conn.pipe(socket);
+        socket.emit('data', head);
+        return socket.resume();
+      }
+    );
+    conn.on('error', self._onSocketError.bind(self, 'PROXY_TO_PROXY_SOCKET'));
+  }
+  */
+
+  /*
+  async getHttpsServer(hostname: string, callback: ErrorCallback) {
+    const self = this;
+
+    const files = {
+      keyFile: `${self.sslCaDir}/keys/${hostname}.key`,
+      certFile: `${self.sslCaDir}/certs/${hostname}.pem`,
+      hosts: [hostname]
+    };
+
+    let keyfile_exists = false;
+    try {
+      await access(files.keyFile, constants.F_OK);
+      keyfile_exists = true;
+    } catch (err) {}
+
+    let certfile_exists = false;
+    try {
+      await access(files.certFile, constants.F_OK);
+      certfile_exists = true;
+    } catch (err) {}
+
+    if (keyfile_exists && certfile_exists) {
+      let keyfile_content = fs_promises.readFile(files.keyFile);
+      let certfile_content = fs_promises.readFile(files.certFile);
+      const cert_data = {
+        key: keyfile_content,
+        cert: certfile_content,
+        hosts: files.hosts
+      };
+    } else {
+      const ctx: ICertficateContext = {
+        hostname: hostname,
+        files: files,
+        data: {
+          keyFileExists: keyfile_exists,
+          certFileExists: certfile_exists
+        }
+      };
+
+      const hosts = files.hosts || [ctx.hostname];
+
+      const generated_certs = await new Promise(function (resolve, reject) {
+        self.ca.generateServerCertificateKeys(
+          hosts,
+          (certPEM: any, privateKeyPEM: any) => {
+            resolve({
+              key: certPEM,
+              cert: privateKeyPEM,
+              hosts: hosts
+            });
+          }
+        );
+      });
+    }
+
+    let hosts;
+    if (
+      results.httpsOptions &&
+      results.httpsOptions.hosts &&
+      results.httpsOptions.hosts.length
+    ) {
+      hosts = results.httpsOptions.hosts;
+      if (!hosts.includes(hostname)) {
+        hosts.push(hostname);
+      }
+    } else {
+      hosts = [hostname];
+    }
+
+    delete results.httpsOptions.hosts;
+    if (self.forceSNI && !hostname.match(/^[\d.]+$/)) {
+      console.debug(`creating SNI context for ${hostname}`);
+      hosts.forEach((host: string) => {
+        self.httpsServer!.addContext(host, results.httpsOptions);
+        self.sslServers[host] = { port: Number(self.httpsPort) };
+      });
+      return callback(null, self.httpsPort);
+    } else {
+      console.debug(`starting server for ${hostname}`);
+      results.httpsOptions.hosts = hosts;
+      try {
+        self._createHttpsServer(
+          results.httpsOptions,
+          (port, httpsServer, wssServer) => {
+            console.debug(`https server started for ${hostname} on ${port}`);
+            const sslServer = {
+              server: httpsServer,
+              wsServer: wssServer,
+              port
+            };
+            hosts.forEach((host: string | number) => {
+              self.sslServers[host] = sslServer;
+            });
+            return callback(null, port);
+          }
+        );
+      } catch (err: any) {
+        return callback(err);
+      }
+    }
+
+    // results: { httpsOptions: SecureContextOptions }
+  }
+  */
+
+  /*
+  async _onHttpServerConnectData(
     req: http.IncomingMessage,
     socket: stream.Duplex,
     head: Buffer
@@ -517,207 +943,58 @@ export class Proxy implements IProxy {
     const self = this;
 
     socket.pause();
-    function makeConnection(port: number) {
-      // open a TCP connection to the remote host
-      const conn = net.connect(
-        {
-          port,
-          host: '0.0.0.0',
-          allowHalfOpen: true
-        },
 
-        () => {
-          // create a tunnel between the two hosts
-          const connectKey = `${conn.localPort}:${conn.remotePort}`;
-          self.connectRequests[connectKey] = req;
-          const cleanupFunction = () => {
-            delete self.connectRequests[connectKey];
-          };
-          conn.on('close', () => {
-            cleanupFunction();
-            socket.destroy();
-          });
-          socket.on('close', () => {
-            conn.destroy();
-          });
-          conn.on('error', (err) => {
-            console.error('Connection error:');
-            console.error(err);
-            conn.destroy();
-          });
-          socket.on('error', (err) => {
-            console.error('Socket error:');
-            console.error(err);
-          });
-          socket.pipe(conn);
-          conn.pipe(socket);
-          socket.emit('data', head);
-          return socket.resume();
-        }
-      );
-      conn.on('error', self._onSocketError.bind(self, 'PROXY_TO_PROXY_SOCKET'));
-    }
-
-    function getHttpsServer(hostname: string, callback: ErrorCallback) {
-      self.onCertificateRequired(hostname, (err, files) => {
-        if (err) {
-          return callback(err);
-        }
-        const httpsOptions = [
-          'keyFileExists',
-          'certFileExists',
-          (
-            data: ICertficateContext['data'],
-            callback: (
-              arg0: Error | null,
-              arg1: { key: any; cert: any; hosts: any } | undefined
-            ) => void
-          ) => {
-            if (data.keyFileExists && data.certFileExists) {
-              return fs.readFile(files.keyFile, (err, keyFileData) => {
-                if (err) {
-                  return callback(err);
-                }
-
-                return fs.readFile(files.certFile, (err, certFileData) => {
-                  if (err) {
-                    return callback(err);
-                  }
-
-                  return callback(null, {
-                    key: keyFileData,
-                    cert: certFileData,
-                    hosts: files.hosts
-                  });
-                });
-              });
-            } else {
-              const ctx: ICertficateContext = {
-                hostname,
-                files,
-                data
-              };
-
-              return self.onCertificateMissing(ctx, files, (err, files) => {
-                if (err) {
-                  return callback(err);
-                }
-
-                return callback(null, {
-                  key: files.keyFileData,
-                  cert: files.certFileData,
-                  hosts: files.hosts
-                });
-              });
-            }
-          }
-        ];
-        async.auto(
-          {
-            keyFileExists(callback) {
-              return fs.exists(files.keyFile, (exists) =>
-                callback(null, exists)
-              );
-            },
-            certFileExists(callback) {
-              return fs.exists(files.certFile, (exists) =>
-                callback(null, exists)
-              );
-            },
-            // @ts-ignore
-            httpsOptions
-          },
-          (
-            err: Error | null | undefined,
-            results: { httpsOptions: SecureContextOptions }
-          ) => {
-            if (err) {
-              return callback(err);
-            }
-            let hosts;
-            if (
-              results.httpsOptions &&
-              results.httpsOptions.hosts &&
-              results.httpsOptions.hosts.length
-            ) {
-              hosts = results.httpsOptions.hosts;
-              if (!hosts.includes(hostname)) {
-                hosts.push(hostname);
-              }
-            } else {
-              hosts = [hostname];
-            }
-            delete results.httpsOptions.hosts;
-            if (self.forceSNI && !hostname.match(/^[\d.]+$/)) {
-              console.debug(`creating SNI context for ${hostname}`);
-              hosts.forEach((host: string) => {
-                self.httpsServer!.addContext(host, results.httpsOptions);
-                self.sslServers[host] = { port: Number(self.httpsPort) };
-              });
-              return callback(null, self.httpsPort);
-            } else {
-              console.debug(`starting server for ${hostname}`);
-              results.httpsOptions.hosts = hosts;
-              try {
-                self._createHttpsServer(
-                  results.httpsOptions,
-                  (port, httpsServer, wssServer) => {
-                    console.debug(
-                      `https server started for ${hostname} on ${port}`
-                    );
-                    const sslServer = {
-                      server: httpsServer,
-                      wsServer: wssServer,
-                      port
-                    };
-                    hosts.forEach((host: string | number) => {
-                      self.sslServers[host] = sslServer;
-                    });
-                    return callback(null, port);
-                  }
-                );
-              } catch (err: any) {
-                return callback(err);
-              }
-            }
-          }
-        );
-      });
-    }
-    /*
-     * Detect TLS from first bytes of data
-     * Inspired from https://gist.github.com/tg-x/835636
-     * used heuristic:
-     * - an incoming connection using SSLv3/TLSv1 records should start with 0x16
-     * - an incoming connection using SSLv2 records should start with the record size
-     *   and as the first record should not be very big we can expect 0x80 or 0x00 (the MSB is a flag)
-     * - everything else is considered to be unencrypted
-     */
+    
+    // * Detect TLS from first bytes of data
+    // * Inspired from https://gist.github.com/tg-x/835636
+    // * used heuristic:
+    // * - an incoming connection using SSLv3/TLSv1 records should start with 0x16
+    // * - an incoming connection using SSLv2 records should start with the record size
+    // *   and as the first record should not be very big we can expect 0x80 or 0x00 (the MSB is a flag)
+    // * - everything else is considered to be unencrypted
+     
     if (head[0] == 0x16 || head[0] == 0x80 || head[0] == 0x00) {
       // URL is in the form 'hostname:port'
       const hostname = req.url!.split(':', 2)[0];
+
       const sslServer = this.sslServers[hostname];
+
       if (sslServer) {
-        return makeConnection(sslServer.port);
+        return self.makeConnection(req, socket, head, sslServer.port);
       }
+
       const wildcardHost = hostname.replace(/[^.]+\./, '*.');
+
       let sem = self.sslSemaphores[wildcardHost];
       if (!sem) {
         sem = self.sslSemaphores[wildcardHost] = semaphore(1);
       }
+
       sem.take(() => {
         if (self.sslServers[hostname]) {
           process.nextTick(sem.leave.bind(sem));
-          return makeConnection(self.sslServers[hostname].port);
+          return self.makeConnection(
+            req,
+            socket,
+            head,
+            self.sslServers[hostname].port
+          );
         }
+
         if (self.sslServers[wildcardHost]) {
           process.nextTick(sem.leave.bind(sem));
           self.sslServers[hostname] = {
             // @ts-ignore
             port: self.sslServers[wildcardHost].port
           };
-          return makeConnection(self.sslServers[hostname].port);
+          return self.makeConnection(
+            req,
+            socket,
+            head,
+            self.sslServers[hostname].port
+          );
         }
+
         getHttpsServer(hostname, (err, port) => {
           process.nextTick(sem.leave.bind(sem));
           if (err) {
@@ -725,15 +1002,18 @@ export class Proxy implements IProxy {
             console.error(err);
             return self._onError('OPEN_HTTPS_SERVER_ERROR', null, err);
           }
-          return makeConnection(port);
+          return self.makeConnection(req, socket, head, port);
         });
+
         delete self.sslSemaphores[wildcardHost];
       });
     } else {
-      return makeConnection(this.httpPort);
+      return self.makeConnection(req, socket, head, this.httpPort);
     }
   }
+  */
 
+  /*
   onCertificateRequired(
     hostname: string,
     callback: OnCertificateRequiredCallback
@@ -745,7 +1025,9 @@ export class Proxy implements IProxy {
       hosts: [hostname]
     });
   }
+  */
 
+  /*
   onCertificateMissing(
     ctx: ICertficateContext,
     files: ICertDetails,
@@ -763,7 +1045,9 @@ export class Proxy implements IProxy {
       }
     );
   }
+  */
 
+  /*
   _onError(kind: string, ctx: IContext | null, err: Error) {
     console.error(kind);
     console.error(err);
@@ -780,7 +1064,9 @@ export class Proxy implements IProxy {
       }
     }
   }
+  */
 
+  /*
   _onWebSocketServerConnect(
     isSSL: boolean,
     ws: WebSocketType,
@@ -935,7 +1221,7 @@ export class Proxy implements IProxy {
 
     let url;
     if (upgradeReq.url == '' || /^\//.test(upgradeReq.url!)) {
-      const hostPort = Proxy.parseHostAndPort(upgradeReq);
+      const hostPort = OpsiHTTPProxy.parseHostAndPort(upgradeReq);
 
       const prefix = ctx.isSSL ? 'wss' : 'ws';
       const port = hostPort!.port ? ':' + hostPort!.port : '';
@@ -1013,7 +1299,9 @@ export class Proxy implements IProxy {
       return makeProxyToServerWebSocket();
     });
   }
+  */
 
+  /*
   _onHttpServerRequest(
     isSSL: boolean,
     clientToProxyRequest: IncomingMessage,
@@ -1122,7 +1410,7 @@ export class Proxy implements IProxy {
       self._onError.bind(self, 'PROXY_TO_CLIENT_RESPONSE_ERROR', ctx)
     );
     ctx.clientToProxyRequest.pause();
-    const hostPort = Proxy.parseHostAndPort(
+    const hostPort = OpsiHTTPProxy.parseHostAndPort(
       ctx.clientToProxyRequest,
       ctx.isSSL ? 443 : 80
     );
@@ -1166,7 +1454,7 @@ export class Proxy implements IProxy {
           }
           ctx.proxyToClientResponse.writeHead(
             servToProxyResp!.statusCode!,
-            Proxy.filterAndCanonizeHeaders(servToProxyResp.headers)
+            OpsiHTTPProxy.filterAndCanonizeHeaders(servToProxyResp.headers)
           );
           // @ts-ignore
           ctx.responseFilters.push(new ProxyFinalResponseFilter(self, ctx));
@@ -1246,7 +1534,9 @@ export class Proxy implements IProxy {
       });
     }
   }
+  */
 
+  /*
   _onRequestHeaders(ctx: IContext, callback: ErrorCallback) {
     async.forEach(
       this.onRequestHeadersHandlers,
@@ -1254,7 +1544,9 @@ export class Proxy implements IProxy {
       callback
     );
   }
+  */
 
+  /*
   _onRequest(ctx: IContext, callback: ErrorCallback) {
     async.forEach(
       this.onRequestHandlers.concat(ctx.onRequestHandlers),
@@ -1262,7 +1554,9 @@ export class Proxy implements IProxy {
       callback
     );
   }
+  */
 
+  /*
   _onWebSocketConnection(ctx: IWebSocketContext, callback: ErrorCallback) {
     async.forEach(
       this.onWebSocketConnectionHandlers.concat(
@@ -1272,7 +1566,9 @@ export class Proxy implements IProxy {
       callback
     );
   }
+  */
 
+  /*
   _onWebSocketFrame(
     ctx: IWebSocketContext,
     type: string,
@@ -1324,7 +1620,9 @@ export class Proxy implements IProxy {
       }
     );
   }
+  */
 
+  /*
   _onWebSocketClose(
     ctx: IWebSocketContext,
     closedByServer: boolean,
@@ -1370,7 +1668,9 @@ export class Proxy implements IProxy {
       );
     }
   }
+  */
 
+  /*
   _onWebSocketError(ctx: IWebSocketContext, err: Error) {
     this.onWebSocketErrorHandlers.forEach((handler) => handler(ctx, err));
     if (ctx) {
@@ -1399,7 +1699,9 @@ export class Proxy implements IProxy {
       }
     }
   }
+  */
 
+  /*
   _onRequestData(
     ctx: IContext,
     chunk: Buffer | undefined,
@@ -1426,7 +1728,9 @@ export class Proxy implements IProxy {
       }
     );
   }
+  */
 
+  /*
   _onRequestEnd(ctx: IContext, callback: ErrorCallback) {
     const self = this;
     async.forEach(
@@ -1440,7 +1744,9 @@ export class Proxy implements IProxy {
       }
     );
   }
+  */
 
+  /*
   _onResponse(ctx: IContext, callback: ErrorCallback) {
     async.forEach(
       this.onResponseHandlers.concat(ctx.onResponseHandlers),
@@ -1448,7 +1754,9 @@ export class Proxy implements IProxy {
       callback
     );
   }
+  */
 
+  /*
   _onResponseHeaders(ctx: IContext, callback: ErrorCallback) {
     async.forEach(
       this.onResponseHeadersHandlers,
@@ -1456,7 +1764,9 @@ export class Proxy implements IProxy {
       callback
     );
   }
+  */
 
+  /*
   _onResponseData(
     ctx: IContext,
     chunk: Buffer | undefined,
@@ -1483,7 +1793,9 @@ export class Proxy implements IProxy {
       }
     );
   }
+  */
 
+  /*
   _onResponseEnd(ctx: IContext, callback: ErrorCallback) {
     async.forEach(
       this.onResponseEndHandlers.concat(ctx.onResponseEndHandlers),
@@ -1496,14 +1808,15 @@ export class Proxy implements IProxy {
       }
     );
   }
+  */
 
   static parseHostAndPort(req: http.IncomingMessage, defaultPort?: number) {
     const m = req.url!.match(/^http:\/\/([^/]+)(.*)/);
     if (m) {
       req.url = m[2] || '/';
-      return Proxy.parseHost(m[1], defaultPort);
+      return OpsiHTTPProxy.parseHost(m[1], defaultPort);
     } else if (req.headers.host) {
-      return Proxy.parseHost(req.headers.host, defaultPort);
+      return OpsiHTTPProxy.parseHost(req.headers.host, defaultPort);
     } else {
       return null;
     }
@@ -1532,6 +1845,7 @@ export class Proxy implements IProxy {
     };
   }
 
+  /*
   static filterAndCanonizeHeaders(originalHeaders: IncomingHttpHeaders) {
     const headers: http_headers_t = {};
     for (const key in originalHeaders) {
@@ -1547,4 +1861,12 @@ export class Proxy implements IProxy {
 
     return headers;
   }
+  */
 }
+
+export {
+  OpsiHTTPProxy,
+  opsiproxy_plugin_info_t,
+  opsiproxy_plugin_t,
+  opsiproxy_options_t
+};

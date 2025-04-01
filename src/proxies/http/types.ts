@@ -125,6 +125,7 @@ export type OnConnectParams = (
   head: any,
   callback: ErrorCallback
 ) => void;
+
 export type IProxy = ICallbacks & {
   /** Starts the proxy listening on the given port.  example: proxy.listen({ port: 80 }); */
   listen(options?: IProxyOptions, callback?: () => void): void;

@@ -1,131 +1,134 @@
-import FS from "fs";
-import path from "path";
-import Forge from "node-forge";
+/* eslint-disable @typescript-eslint/no-unsafe-function-type */
+/* eslint-disable @typescript-eslint/no-this-alias */
+/* eslint-disable @typescript-eslint/no-explicit-any */
+import FS from 'fs';
+import path from 'path';
+import Forge from 'node-forge';
 const { pki, md } = Forge;
-import mkdirp from "mkdirp";
-import async from "async";
+import { mkdirp } from 'mkdirp';
+import async from 'async';
 import ErrnoException = NodeJS.ErrnoException;
 
 const CAattrs = [
   {
-    name: "commonName",
-    value: "NodeMITMProxyCA",
+    name: 'commonName',
+    value: 'NodeMITMProxyCA'
   },
   {
-    name: "countryName",
-    value: "Internet",
+    name: 'countryName',
+    value: 'Internet'
   },
   {
-    shortName: "ST",
-    value: "Internet",
+    shortName: 'ST',
+    value: 'Internet'
   },
   {
-    name: "localityName",
-    value: "Internet",
+    name: 'localityName',
+    value: 'Internet'
   },
   {
-    name: "organizationName",
-    value: "Node MITM Proxy CA",
+    name: 'organizationName',
+    value: 'Node MITM Proxy CA'
   },
   {
-    shortName: "OU",
-    value: "CA",
-  },
+    shortName: 'OU',
+    value: 'CA'
+  }
 ];
 
 const CAextensions = [
   {
-    name: "basicConstraints",
-    cA: true,
+    name: 'basicConstraints',
+    cA: true
   },
   {
-    name: "keyUsage",
+    name: 'keyUsage',
     keyCertSign: true,
     digitalSignature: true,
     nonRepudiation: true,
     keyEncipherment: true,
-    dataEncipherment: true,
+    dataEncipherment: true
   },
   {
-    name: "extKeyUsage",
+    name: 'extKeyUsage',
     serverAuth: true,
     clientAuth: true,
     codeSigning: true,
     emailProtection: true,
-    timeStamping: true,
+    timeStamping: true
   },
   {
-    name: "nsCertType",
+    name: 'nsCertType',
     client: true,
     server: true,
     email: true,
     objsign: true,
     sslCA: true,
     emailCA: true,
-    objCA: true,
+    objCA: true
   },
   {
-    name: "subjectKeyIdentifier",
-  },
+    name: 'subjectKeyIdentifier'
+  }
 ];
 
 const ServerAttrs = [
   {
-    name: "countryName",
-    value: "Internet",
+    name: 'countryName',
+    value: 'Internet'
   },
   {
-    shortName: "ST",
-    value: "Internet",
+    shortName: 'ST',
+    value: 'Internet'
   },
   {
-    name: "localityName",
-    value: "Internet",
+    name: 'localityName',
+    value: 'Internet'
   },
   {
-    name: "organizationName",
-    value: "Node MITM Proxy CA",
+    name: 'organizationName',
+    value: 'Node MITM Proxy CA'
   },
   {
-    shortName: "OU",
-    value: "Node MITM Proxy Server Certificate",
-  },
+    shortName: 'OU',
+    value: 'Node MITM Proxy Server Certificate'
+  }
 ];
 
 const ServerExtensions = [
   {
-    name: "basicConstraints",
-    cA: false,
+    name: 'basicConstraints',
+    cA: false
   },
   {
-    name: "keyUsage",
+    name: 'keyUsage',
     keyCertSign: false,
     digitalSignature: true,
     nonRepudiation: false,
     keyEncipherment: true,
-    dataEncipherment: true,
+    dataEncipherment: true
   },
   {
-    name: "extKeyUsage",
+    name: 'extKeyUsage',
     serverAuth: true,
     clientAuth: true,
     codeSigning: false,
     emailProtection: false,
-    timeStamping: false,
+    timeStamping: false
   },
   {
-    name: "nsCertType",
+    name: 'nsCertType',
     client: true,
     server: true,
     email: false,
     objsign: false,
     sslCA: false,
     emailCA: false,
-    objCA: false,
+    objCA: false
   },
   {
-    name: "subjectKeyIdentifier",
-  },
+    name: 'subjectKeyIdentifier'
+  }
 ] as any[];
 
 export class CA {
@@ -135,24 +138,24 @@ export class CA {
   CAcert!: ReturnType<typeof Forge.pki.createCertificate>;
   CAkeys!: ReturnType<typeof Forge.pki.rsa.generateKeyPair>;
 
-  static create(caFolder, callback) {
+  static async create(caFolder: any, callback: any) {
     const ca = new CA();
     ca.baseCAFolder = caFolder;
-    ca.certsFolder = path.join(ca.baseCAFolder, "certs");
-    ca.keysFolder = path.join(ca.baseCAFolder, "keys");
-    mkdirp.sync(ca.baseCAFolder);
-    mkdirp.sync(ca.certsFolder);
-    mkdirp.sync(ca.keysFolder);
+    ca.certsFolder = path.join(ca.baseCAFolder, 'certs');
+    ca.keysFolder = path.join(ca.baseCAFolder, 'keys');
+    await mkdirp(ca.baseCAFolder);
+    await mkdirp(ca.certsFolder);
+    await mkdirp(ca.keysFolder);
     async.series(
       [
         (callback) => {
-          const exists = FS.existsSync(path.join(ca.certsFolder, "ca.pem"));
+          const exists = FS.existsSync(path.join(ca.certsFolder, 'ca.pem'));
           if (exists) {
             ca.loadCA(callback);
           } else {
             ca.generateCA(callback);
           }
-        },
+        }
       ],
       (err) => {
         if (err) {
@@ -165,7 +168,7 @@ export class CA {
 
   randomSerialNumber() {
     // generate random 16 bytes hex string
-    let sn = "";
+    let sn = '';
     for (let i = 0; i < 4; i++) {
       sn += `00000000${Math.floor(Math.random() * 256 ** 4).toString(
         16
@@ -207,19 +210,19 @@ export class CA {
       const tasks = [
         FS.writeFile.bind(
           null,
-          path.join(self.certsFolder, "ca.pem"),
+          path.join(self.certsFolder, 'ca.pem'),
           pki.certificateToPem(cert)
         ),
         FS.writeFile.bind(
           null,
-          path.join(self.keysFolder, "ca.private.key"),
+          path.join(self.keysFolder, 'ca.private.key'),
           pki.privateKeyToPem(keys.privateKey)
         ),
         FS.writeFile.bind(
           null,
-          path.join(self.keysFolder, "ca.public.key"),
+          path.join(self.keysFolder, 'ca.public.key'),
           pki.publicKeyToPem(keys.publicKey)
-        ),
+        )
       ];
       async.parallel(tasks, callback);
     });
@@ -230,22 +233,22 @@ export class CA {
     async.auto(
       {
         certPEM(callback) {
-          FS.readFile(path.join(self.certsFolder, "ca.pem"), "utf-8", callback);
+          FS.readFile(path.join(self.certsFolder, 'ca.pem'), 'utf-8', callback);
         },
         keyPrivatePEM(callback) {
           FS.readFile(
-            path.join(self.keysFolder, "ca.private.key"),
-            "utf-8",
+            path.join(self.keysFolder, 'ca.private.key'),
+            'utf-8',
             callback
           );
         },
         keyPublicPEM(callback) {
           FS.readFile(
-            path.join(self.keysFolder, "ca.public.key"),
-            "utf-8",
+            path.join(self.keysFolder, 'ca.public.key'),
+            'utf-8',
             callback
           );
-        },
+        }
       },
       (
         err,
@@ -259,16 +262,16 @@ export class CA {
         self.CAcert = pki.certificateFromPem(results!.certPEM);
         self.CAkeys = {
           privateKey: pki.privateKeyFromPem(results!.keyPrivatePEM),
-          publicKey: pki.publicKeyFromPem(results!.keyPublicPEM),
+          publicKey: pki.publicKeyFromPem(results!.keyPublicPEM)
         };
         return callback();
       }
     );
   }
 
-  generateServerCertificateKeys(hosts: string | string[], cb) {
+  generateServerCertificateKeys(hosts: string | string[], cb: any) {
     const self = this;
-    if (typeof hosts === "string") {
+    if (typeof hosts === 'string') {
       hosts = [hosts];
     }
     const mainHost = hosts[0];
@@ -286,22 +289,22 @@ export class CA {
     );
     const attrsServer = ServerAttrs.slice(0);
     attrsServer.unshift({
-      name: "commonName",
-      value: mainHost,
+      name: 'commonName',
+      value: mainHost
     });
     certServer.setSubject(attrsServer);
     certServer.setIssuer(this.CAcert.issuer.attributes);
     certServer.setExtensions(
       ServerExtensions.concat([
         {
-          name: "subjectAltName",
+          name: 'subjectAltName',
           altNames: hosts.map((host) => {
             if (host.match(/^[\d.]+$/)) {
               return { type: 7, ip: host };
             }
             return { type: 2, value: host };
-          }),
-        },
+          })
+        }
       ])
     );
     certServer.sign(this.CAkeys.privateKey, md.sha256.create());
@@ -309,7 +312,7 @@ export class CA {
     const keyPrivatePem = pki.privateKeyToPem(keysServer.privateKey);
     const keyPublicPem = pki.publicKeyToPem(keysServer.publicKey);
     FS.writeFile(
-      `${this.certsFolder}/${mainHost.replace(/\*/g, "_")}.pem`,
+      `${this.certsFolder}/${mainHost.replace(/\*/g, '_')}.pem`,
       certPem,
       (error) => {
         if (error) {
@@ -321,7 +324,7 @@ export class CA {
       }
     );
     FS.writeFile(
-      `${this.keysFolder}/${mainHost.replace(/\*/g, "_")}.key`,
+      `${this.keysFolder}/${mainHost.replace(/\*/g, '_')}.key`,
       keyPrivatePem,
       (error) => {
         if (error) {
@@ -333,7 +336,7 @@ export class CA {
       }
     );
     FS.writeFile(
-      `${this.keysFolder}/${mainHost.replace(/\*/g, "_")}.public.key`,
+      `${this.keysFolder}/${mainHost.replace(/\*/g, '_')}.public.key`,
       keyPublicPem,
       (error) => {
         if (error) {
