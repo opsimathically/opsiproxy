@@ -178,6 +178,7 @@ export class Proxy implements IProxy {
   static gunzip = gunzip;
 
   constructor() {
+    /*
     this.onConnectHandlers = [];
     this.onRequestHandlers = [];
     this.onRequestHeadersHandlers = [];
@@ -192,6 +193,7 @@ export class Proxy implements IProxy {
     this.onResponseHeadersHandlers = [];
     this.onResponseDataHandlers = [];
     this.onResponseEndHandlers = [];
+    */
     this.responseContentPotentiallyModified = false;
   }
 
@@ -338,6 +340,11 @@ export class Proxy implements IProxy {
     return this;
   }
 
+  // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+  // %%% Handler Definitions %%%%%%%%%%%%%%%%%%%%%%
+  // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+  /*
   onError(fn: OnErrorParams) {
     this.onErrorHandlers.push(fn);
     return this;
@@ -448,112 +455,7 @@ export class Proxy implements IProxy {
     this.onResponseEndHandlers.push(fn);
     return this;
   }
-
-  use(mod: {
-    onError: OnErrorParams;
-    onCertificateRequired: (
-      hostname: string,
-      callback: OnCertificateRequiredCallback
-    ) => void;
-    onCertificateMissing: (
-      ctx: ICertficateContext,
-      files: ICertDetails,
-      callback: ErrorCallback
-    ) => void;
-    onConnect: OnConnectParams;
-    onRequest: OnRequestParams;
-    onRequestHeaders: OnRequestParams;
-    onRequestData: OnRequestDataParams;
-    onResponse: OnRequestParams;
-    onResponseHeaders: OnRequestParams;
-    onResponseData: OnRequestDataParams;
-    onWebSocketConnection: OnWebsocketRequestParams;
-    onWebSocketSend: unknown;
-    onWebSocketMessage: unknown;
-    onWebSocketFrame: OnWebSocketFrameParams;
-    onWebSocketClose: OnWebSocketCloseParams;
-    onWebSocketError: OnWebSocketErrorParams;
-  }) {
-    if (mod.onError) {
-      this.onError(mod.onError);
-    }
-    if (mod.onCertificateRequired) {
-      this.onCertificateRequired = mod.onCertificateRequired;
-    }
-    if (mod.onCertificateMissing) {
-      this.onCertificateMissing = mod.onCertificateMissing;
-    }
-    if (mod.onConnect) {
-      this.onConnect(mod.onConnect);
-    }
-    if (mod.onRequest) {
-      this.onRequest(mod.onRequest);
-    }
-    if (mod.onRequestHeaders) {
-      this.onRequestHeaders(mod.onRequestHeaders);
-    }
-    if (mod.onRequestData) {
-      this.onRequestData(mod.onRequestData);
-    }
-    if (mod.onResponse) {
-      this.onResponse(mod.onResponse);
-    }
-    if (mod.onResponseHeaders) {
-      this.onResponseHeaders(mod.onResponseHeaders);
-    }
-    if (mod.onResponseData) {
-      this.onResponseData(mod.onResponseData);
-    }
-    if (mod.onWebSocketConnection) {
-      this.onWebSocketConnection(mod.onWebSocketConnection);
-    }
-    if (mod.onWebSocketSend) {
-      this.onWebSocketFrame(
-        function (
-          ctx: any,
-          type: string,
-          fromServer: any,
-          data: any,
-          flags: any,
-          callback: (arg0: null, arg1: any, arg2: any) => void
-        ) {
-          if (!fromServer && type === 'message') {
-            return this(ctx, data, flags, callback);
-          } else {
-            callback(null, data, flags);
-          }
-        }.bind(mod.onWebSocketSend)
-      );
-    }
-    if (mod.onWebSocketMessage) {
-      this.onWebSocketFrame(
-        function (
-          ctx: any,
-          type: string,
-          fromServer: any,
-          data: any,
-          flags: any,
-          callback: (arg0: null, arg1: any, arg2: any) => void
-        ) {
-          if (fromServer && type === 'message') {
-            return this(ctx, data, flags, callback);
-          } else {
-            callback(null, data, flags);
-          }
-        }.bind(mod.onWebSocketMessage)
-      );
-    }
-    if (mod.onWebSocketFrame) {
-      this.onWebSocketFrame(mod.onWebSocketFrame);
-    }
-    if (mod.onWebSocketClose) {
-      this.onWebSocketClose(mod.onWebSocketClose);
-    }
-    if (mod.onWebSocketError) {
-      this.onWebSocketError(mod.onWebSocketError);
-    }
-    return this;
-  }
+  */
 
   // Since node 0.9.9, ECONNRESET on sockets are no longer hidden
   _onSocketError(socketDescription: string, err: NodeJS.ErrnoException) {
