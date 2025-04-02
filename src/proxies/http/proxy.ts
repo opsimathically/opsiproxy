@@ -162,6 +162,10 @@ interface opsiproxy_socket_i extends net.Socket {
 }
 
 type opsiproxy_options_t = {
+  // net.BlockList for incomming proxy connections (people connecting to the proxy)
+  proxy_incomming_block_list?: net.BlockList;
+  // net.BlockList for outgoing requests that the proxy itself makes.
+  proxy_outgoing_block_list?: net.BlockList;
   // The port or named socket to listen on (default: 8080).
   httpPort: number;
   // The hostname or local address to listen on.
@@ -182,6 +186,7 @@ type opsiproxy_options_t = {
   httpsPort: number;
   // Setting this option will remove the content-length from the proxy to server request, forcing chunked encoding
   forceChunkedRequest: boolean;
+  // Proxy plugins.
   plugins: opsiproxy_plugin_t[];
 };
 
@@ -263,26 +268,62 @@ type http_headers_t = Record<string, string>;
  */
 
 class OpsiHTTPProxy {
-  ca!: ca;
-  connectRequests: Record<string, http.IncomingMessage> = {};
+  /*
+  // These are found within the options set, and appear to have 
+  // been duplicated.
   forceSNI!: boolean;
   httpAgent!: http.Agent;
   httpHost?: string;
   httpPort!: number;
-  httpServer: HTTPServer | undefined = http.createServer();
   httpsAgent!: https.Agent;
   httpsPort?: number;
-  httpsServer: Server | undefined;
   keepAlive!: boolean;
+  sslCaDir!: string;
+  timeout!: number;
 
   // opsiproxy plugins
   plugins: opsiproxy_plugin_t[] = [];
+  */
 
-  // socket manager
+  static wildcard = wildcard;
+  static gunzip = gunzip;
+
+  // certficate authority
+  ca!: ca;
+
+  // connection requests
+  connectRequests: Record<string, http.IncomingMessage> = {};
+
+  // a map of all request contexts
   context_map: Map<string, OpsiproxyRequestContext> = new Map<
     string,
     OpsiproxyRequestContext
   >();
+
+  // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+  // %%% Proxy Servers %%%%%%%%%%%%%%%
+  // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+  /**
+   * This server handles all socket requests from proxy clients, forwarding
+   * them into the httpServer.  It's necessary because if we just use http
+   * servers directly, we cannot capture and pause initial socket states
+   * for plugins to operate/handle.
+   */
+  netServer!: net.Server;
+
+  /**
+   * Main http proxy server.
+   */
+  httpServer!: http.Server;
+
+  /**
+   * Investigating if it's necessary.  I'd rather just use stunnel
+   * to handle encryption between points instead of having two different
+   * proxy implementations, especially since node tls isn't exactly perfectly
+   * fast.
+   */
+  httpsServer!: https.Server;
 
   /*
   onConnectHandlers: HandlerType<IProxy['onConnect']>;
@@ -301,19 +342,19 @@ class OpsiHTTPProxy {
   onWebSocketFrameHandlers: HandlerType<IProxy['onWebSocketFrame']>;
   */
   options!: opsiproxy_options_t;
+
+  // not sure what this is used for; wouldn't this be relevant only
+  // in a context?
   responseContentPotentiallyModified: boolean;
-  sslCaDir!: string;
+
   sslSemaphores: Record<string, semaphore.Semaphore> = {};
   sslServers: Record<string, IProxySSLServer> = {};
-  timeout!: number;
+
   wsServer: WebSocketServer | undefined;
   wssServer: WebSocketServer | undefined;
-  static wildcard = wildcard;
-  static gunzip = gunzip;
 
-  constructor(params: opsiproxy_options_t) {
-    this.options = params;
-    this.plugins = params.plugins;
+  constructor(options: opsiproxy_options_t) {
+    this.options = options;
     /*
     this.onConnectHandlers = [];
     this.onRequestHandlers = [];
@@ -333,6 +374,11 @@ class OpsiHTTPProxy {
     this.responseContentPotentiallyModified = false;
   }
 
+  async start() {
+    // create https proxy server
+    // create http proxy server
+  }
+
   // check if something is a writable directory
   async isWritableDirectory(p: string): Promise<boolean> {
     try {
@@ -350,70 +396,35 @@ class OpsiHTTPProxy {
     // set self reference
     const opsiproxy_ref = this;
 
-    // Create the HTTP server (but don't call .listen() on it)
-    const httpServer = new http.Server((req, res) => {
-      debugger;
-      res.writeHead(200);
-      res.end('Hello after delayed resume!');
-    });
-
-    const server = net.createServer((socket) => {
-      debugger;
-      httpServer.emit('connection', socket);
-    });
-
-    const deferral: Deferred = new Deferred();
-    server.listen(8080, () => {
-      deferral.resolve(true);
-    });
-    await deferral.promise;
-    return;
-
     // set options
     const options = opsiproxy_ref.options;
-    opsiproxy_ref.httpPort = options.httpPort;
-
-    opsiproxy_ref.httpHost = options.host;
-    opsiproxy_ref.timeout = options.timeout;
-    opsiproxy_ref.keepAlive = options.keepAlive;
-
-    opsiproxy_ref.httpAgent =
-      typeof options.httpAgent !== 'undefined'
-        ? options.httpAgent
-        : new http.Agent({ keepAlive: this.keepAlive });
-
-    opsiproxy_ref.httpsAgent = options.httpsAgent;
-
-    opsiproxy_ref.forceSNI = options.forceSNI;
 
     // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
     // %%% Certificate Authority %%%%%%%%%%%%%%%%%%%%%
     // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
     // always ensure the ca directory exists
-    opsiproxy_ref.sslCaDir = options.sslCaDir;
-    if (!(await opsiproxy_ref.isWritableDirectory(opsiproxy_ref.sslCaDir))) {
+
+    if (
+      !(await opsiproxy_ref.isWritableDirectory(opsiproxy_ref.options.sslCaDir))
+    ) {
       throw new Error('opsiproxy_ssl_ca_dir_is_invalid');
     }
 
-    // attempt to create the certificate authority instance
-    const certificate_authority: ca = await new Promise(function (
-      resolve,
-      reject
-    ) {
-      ca.create(
-        opsiproxy_ref.sslCaDir,
-        (err: Error | null | undefined, ca: ca) => {
-          if (err) {
-            reject(err);
-            return;
-          }
-          resolve(ca);
+    const ca_deferral: Deferred = new Deferred();
+    ca.create(
+      opsiproxy_ref.options.sslCaDir,
+      (err: Error | null | undefined, ca: ca) => {
+        if (err) {
+          throw err;
+          return;
         }
-      );
-    });
-
+        ca_deferral.resolve(ca);
+      }
+    );
+    const certificate_authority: ca = await ca_deferral.promise;
     opsiproxy_ref.ca = certificate_authority;
+
     opsiproxy_ref.sslServers = {};
     opsiproxy_ref.sslSemaphores = {};
     opsiproxy_ref.connectRequests = {};
@@ -422,8 +433,65 @@ class OpsiHTTPProxy {
     // %%% HTTP Server/Event Handlers %%%%%%%%%
     // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-    opsiproxy_ref.httpServer = http.createServer();
-    opsiproxy_ref.httpServer.timeout = opsiproxy_ref.timeout;
+    // TOMORROW TOMORROW TOMORROW TOMORROW TOMORROW
+    // TOMORROW TOMORROW TOMORROW TOMORROW TOMORROW
+    // TOMORROW TOMORROW TOMORROW TOMORROW TOMORROW
+    // TOMORROW TOMORROW TOMORROW TOMORROW TOMORROW
+    // Return here, replace existing http server with this http server.
+    // Do not worry about browser/client encryption, stunnel is the
+    // solution there.
+
+    // This is effectively the
+    /*
+    const httpServer = new http.Server((req, res) => {
+      debugger;
+      res.writeHead(200);
+      res.end('Hello after delayed resume!');
+    });
+    */
+
+    opsiproxy_ref.httpServer = new http.Server();
+    opsiproxy_ref.httpServer.timeout = opsiproxy_ref.options.timeout;
+
+    // create server
+    opsiproxy_ref.netServer = net.createServer(
+      {
+        pauseOnConnect: true,
+        blockList: opsiproxy_ref.options.proxy_incomming_block_list
+      },
+      async (socket) => {
+        debugger;
+        opsiproxy_ref.httpServer.emit('connection', socket);
+      }
+    );
+
+    // ensure servers were created ok
+    if (!opsiproxy_ref.netServer)
+      throw new Error('opsiproxy_could_not_create_net_server');
+    if (!opsiproxy_ref.httpServer)
+      throw new Error('opsiproxy_could_not_create_proxy_http_server');
+
+    // setup proxy server and websocket
+    await opsiproxy_ref.setupHttpProxyServerEventHandlers();
+    await opsiproxy_ref.setupHttpProxyWebsocketServerEventHandlers();
+
+    // start the net server
+    const deferral: Deferred = new Deferred();
+    opsiproxy_ref.netServer.listen(
+      {
+        host: opsiproxy_ref.options.host,
+        port: opsiproxy_ref.options.httpPort
+      },
+      () => {
+        deferral.resolve(true);
+      }
+    );
+    return await deferral.promise;
+  }
+
+  async setupHttpProxyServerEventHandlers() {
+    // set self reference
+    const opsiproxy_ref = this;
 
     // handle client->opsiproxy connections
     // self.httpServer!.on('connect', self._onHttpServerConnect.bind(self));
@@ -634,6 +702,26 @@ class OpsiHTTPProxy {
       }
     );
 
+    /*
+    if (self.forceSNI) {
+      // start the single HTTPS server now
+      self._createHttpsServer({}, (port, httpsServer, wssServer) => {
+        console.debug(`https server started on ${port}`);
+        self.httpsServer = httpsServer;
+        self.wssServer = wssServer;
+        self.httpsPort = port;
+        self.httpServer!.listen(listenOptions, () => {
+          self.httpPort = (self.httpServer!.address() as AddressInfo).port;
+        });
+      });
+    } else {
+     */
+  }
+
+  async setupHttpProxyWebsocketServerEventHandlers() {
+    // set self reference
+    const opsiproxy_ref = this;
+
     // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
     // %%% WebSocket Server %%%%%%%%%%%%%%%%%%%
     // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -667,44 +755,6 @@ class OpsiHTTPProxy {
         debugger;
       }
     );
-
-    const listenOptions = {
-      host: opsiproxy_ref.httpHost,
-      port: opsiproxy_ref.httpPort
-    };
-
-    /*
-    if (self.forceSNI) {
-      // start the single HTTPS server now
-      self._createHttpsServer({}, (port, httpsServer, wssServer) => {
-        console.debug(`https server started on ${port}`);
-        self.httpsServer = httpsServer;
-        self.wssServer = wssServer;
-        self.httpsPort = port;
-        self.httpServer!.listen(listenOptions, () => {
-          self.httpPort = (self.httpServer!.address() as AddressInfo).port;
-        });
-      });
-    } else {
-     */
-
-    await new Promise(function (resolve, reject) {
-      if (!opsiproxy_ref.httpServer) {
-        reject('opsiproxy_http_server_not_present');
-        return;
-      }
-      opsiproxy_ref.httpServer.listen(listenOptions, () => {
-        opsiproxy_ref.httpPort = (
-          opsiproxy_ref.httpServer!.address() as AddressInfo
-        ).port;
-        resolve(true);
-      });
-    });
-    /*
-    }
-    */
-
-    return true;
   }
 
   async close() {
