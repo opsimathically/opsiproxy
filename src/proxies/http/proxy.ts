@@ -5,8 +5,13 @@
 /* eslint-disable @typescript-eslint/no-this-alias */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
+import { randomGuid } from '@opsimathically/randomdatatools';
 import IterAsync from '@opsimathically/iterasync';
-import { OpsiproxyRequestContext } from '@src/proxies/http/contexts/OpsiproxyRequestContext.class';
+import { Deferred, DeferredMap } from '@opsimathically/deferred';
+import {
+  OpsiproxyRequestContext,
+  opsiproxy_http_incomming_message_i
+} from '@src/proxies/http/contexts/OpsiproxyRequestContext.class';
 
 import { constants } from 'fs';
 import { access } from 'fs/promises';
@@ -70,12 +75,60 @@ type opsiproxy_plugin_info_t = {
   description: string;
 };
 
+/**
+ * The return data from a plugin event handler.  It is instrumental in determining
+ * how the proxy will behave with regards to context.
+ */
+type plugin_method_ret_t = {
+  /**
+   * end:
+   * Will call context end, destroying the entire context, stopping any further
+   * continuance.
+   *
+   * continue:
+   * Asserts that the plugin has interacted with the context at this stage, but instructs to continue
+   * passing the context to the next plugin.
+   *
+   * go_next_stage:
+   * Indicates that the plugin interacted with the context, and instructs the context to move to
+   * the next stage in the proxying process.
+   *
+   * handled:
+   * Asserts that the plugin has handled this stage of the connection/request.  No more
+   * plugins will be called, and it is assumed that the plugin will be handling the remainder
+   * of any and all stages.  For example, if a request is handled by a plugin, the proxy will
+   * not forward the request, will not end the request, and will simply assume that the context
+   * is handled by the plugin from there on.
+   *
+   * noop: (no operation)
+   * The plugin had a relevant event handler present, and it was executed, but it did
+   * not affect the context at all.  Will proceed to the next plugin.
+   */
+  behavior: 'end' | 'continue' | 'handled' | 'noop' | 'go_next_stage';
+};
+
 type opsiproxy_plugin_t = {
   info: opsiproxy_plugin_info_t;
+
+  // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+  // %%% Client To Proxy Events %%%%%%%
+  // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+  clientToProxy_onConnection?(params: {
+    ctx: OpsiproxyRequestContext;
+  }): Promise<plugin_method_ret_t | undefined>;
+
+  // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+  // %%% Proxy To Server Events %%%%%%%
+  // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
   onError?(): Promise<any>;
   onConnect?(): Promise<any>;
   onRequestHeaders?(): Promise<any>;
-  onRequest?(): Promise<any>;
+  onRequest?(params: {
+    opsiproxy_ref: OpsiHTTPProxy;
+    request_context: OpsiproxyRequestContext;
+  }): Promise<any>;
   onWebSocketConnection?(): Promise<any>;
   onWebSocketSend?(): Promise<any>;
   onWebSocketMessage?(): Promise<any>;
@@ -100,6 +153,11 @@ interface WebSocketFlags {
 
 interface opsiproxy_websocket_i extends WebSocket {
   upgradeReq?: IncomingMessage;
+}
+
+interface opsiproxy_socket_i extends net.Socket {
+  uuid?: string;
+  deferral?: Deferred;
 }
 
 type opsiproxy_options_t = {
@@ -202,6 +260,7 @@ type http_headers_t = Record<string, string>;
  * To integrate multiple tools and systems based on proxy context.
  *
  */
+
 class OpsiHTTPProxy {
   ca!: ca;
   connectRequests: Record<string, http.IncomingMessage> = {};
@@ -209,7 +268,7 @@ class OpsiHTTPProxy {
   httpAgent!: http.Agent;
   httpHost?: string;
   httpPort!: number;
-  httpServer: HTTPServer | undefined;
+  httpServer: HTTPServer | undefined = http.createServer();
   httpsAgent!: https.Agent;
   httpsPort?: number;
   httpsServer: Server | undefined;
@@ -217,6 +276,12 @@ class OpsiHTTPProxy {
 
   // opsiproxy plugins
   plugins: opsiproxy_plugin_t[] = [];
+
+  // socket manager
+  context_map: Map<string, OpsiproxyRequestContext> = new Map<
+    string,
+    OpsiproxyRequestContext
+  >();
 
   /*
   onConnectHandlers: HandlerType<IProxy['onConnect']>;
@@ -247,7 +312,7 @@ class OpsiHTTPProxy {
 
   constructor(params: opsiproxy_options_t) {
     this.options = params;
-
+    this.plugins = params.plugins;
     /*
     this.onConnectHandlers = [];
     this.onRequestHandlers = [];
@@ -334,43 +399,163 @@ class OpsiHTTPProxy {
     opsiproxy_ref.connectRequests = {};
 
     // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-    // %%% HTTP Server %%%%%%%%%%%%%%%%%%%%%%%%
+    // %%% HTTP Server/Event Handlers %%%%%%%%%
     // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
     opsiproxy_ref.httpServer = http.createServer();
-    opsiproxy_ref.httpServer!.timeout = opsiproxy_ref.timeout;
+    opsiproxy_ref.httpServer.timeout = opsiproxy_ref.timeout;
 
     // handle client->opsiproxy connections
     // self.httpServer!.on('connect', self._onHttpServerConnect.bind(self));
-    opsiproxy_ref.httpServer!.on(
+
+    // when the http server itself closes, not the request or connection
+    opsiproxy_ref.httpServer.on('close', async () => {});
+
+    opsiproxy_ref.httpServer.on(
+      'dropRequest',
+      async (request: http.IncomingMessage, socket: stream.Duplex) => {}
+    );
+
+    // NOTE: For people reading this code, this is the CONNECT method, not the socket connecting.
+    opsiproxy_ref.httpServer.on(
       'connect',
-      (req: IncomingMessage, socket: stream.Duplex, head: Buffer) => {
+      async (req: IncomingMessage, socket: stream.Duplex, head: Buffer) => {
+        debugger;
+      }
+    );
+
+    opsiproxy_ref.httpServer.on(
+      'connection',
+      async (socket: opsiproxy_socket_i) => {
+        // set socket uuid on connection
+        socket.uuid = randomGuid();
+        // create new context and immediately pause the request
+        const ctx = new OpsiproxyRequestContext();
+        ctx.opsiproxy_ref = opsiproxy_ref;
+        ctx.socket = socket;
+        ctx.uuid = socket.uuid;
+        ctx.setHttpEventFlag('connection', true);
+
+        // add context to the context map
+        opsiproxy_ref.context_map.set(ctx.uuid, ctx);
+        ctx.setHttpEventFlag('context_added_to_map', true);
+
+        // create a deferral so that other events know to pause here
+        socket.deferral = ctx.deferred_map.deferred();
+
+        for (
+          let plugin_idx = 0;
+          plugin_idx < opsiproxy_ref.plugins.length;
+          plugin_idx++
+        ) {
+          const plugin = opsiproxy_ref.plugins[plugin_idx];
+          if (plugin.clientToProxy_onConnection) {
+            const plugin_result = await plugin.clientToProxy_onConnection({
+              ctx: ctx
+            });
+
+            // don't mark noops
+            if (!plugin_result) continue;
+            if (plugin_result.behavior === 'noop') continue;
+
+            // set plugin event flag in context
+            ctx.setPluginEventFlag(
+              plugin,
+              'connection',
+              plugin_result.behavior
+            );
+
+            if (plugin_result.behavior === 'handled') break;
+            if (plugin_result.behavior === 'continue') continue;
+            if (plugin_result.behavior === 'end') {
+              socket.deferral.resolve(false);
+              return;
+            }
+          }
+        }
+
+        socket.deferral.resolve(true);
         debugger;
       }
     );
 
     // handle client->opsiproxy requests
     // self.httpServer!.on('request', self._onHttpServerRequest.bind(self, false));
-    opsiproxy_ref.httpServer!.on(
+    opsiproxy_ref.httpServer.on(
       'request',
-      (
-        req: IncomingMessage,
-        res: ServerResponse<IncomingMessage> & { req: IncomingMessage }
+      async (
+        clientToProxyRequest: opsiproxy_http_incomming_message_i,
+        proxyToClientResponse: ServerResponse<IncomingMessage> & {
+          req: IncomingMessage;
+        }
       ) => {
-        // create new context and immediately pause the request
-        const ctx = new OpsiproxyRequestContext();
-        ctx.clientToProxyRequest = req;
+        const opsiproxy_socket: opsiproxy_socket_i =
+          clientToProxyRequest.socket as opsiproxy_socket_i;
+
+        if (!opsiproxy_socket.deferral?.promise)
+          throw new Error('socket_did_not_contain_a_deferral');
+
+        // we need to wait for the socket deferral to resolve, this is how we
+        // force synchronization between our async plugin callbacks.
+        const deferral_result = await opsiproxy_socket.deferral.promise;
+        if (!deferral_result) {
+          return;
+        }
+
+        debugger;
+        const request_socket_uuid = (
+          clientToProxyRequest.socket as opsiproxy_socket_i
+        ).uuid;
+        if (!request_socket_uuid) {
+          proxyToClientResponse.end();
+          return;
+        }
+
+        // gather existing context from map
+        const ctx = opsiproxy_ref.context_map.get(request_socket_uuid);
+        if (!ctx) {
+          proxyToClientResponse.end();
+          return;
+        }
+
+        ctx.setHttpEventFlag('request_context_is_valid', true);
+
+        debugger;
+        /*
+        ctx.clientToProxyRequest = clientToProxyRequest;
         ctx.clientToProxyRequest.pause();
         ctx.isSSL = false;
-
-        ctx.proxyToClientResponse = res;
+        ctx.proxyToClientResponse = proxyToClientResponse;
         ctx.responseContentPotentiallyModified = false;
+
+        // attempt to parse url and host header
+        const request_url_parsed_ok =
+          await ctx.parseRequestURL(clientToProxyRequest);
+        const host_header_parsed_ok =
+          await ctx.parseRequestHostHeader(clientToProxyRequest);
+        */
+        debugger;
+        /*
+        const hostPort = {
+          host: '',
+          port: 0
+        };
+
+
+        // use host header by default, fallback to request
+        if (host_header_parsed_ok) {
+          hostPort.host = ctx.clientToProxyRequest.parsed_host_header.host;
+          hostPort.port = ctx.clientToProxyRequest.parsed_host_header.port;
+        } else if (request_url_parsed_ok) {
+        } else {
+        }
 
         const hostPort = OpsiHTTPProxy.parseHostAndPort(
           ctx.clientToProxyRequest,
           ctx.isSSL ? 443 : 80
         );
 
+        debugger;
         // ensure hostPort was parsed ok
         if (!hostPort) {
           ctx.clientToProxyRequest.resume();
@@ -393,6 +578,7 @@ class OpsiHTTPProxy {
               if (typeof h === 'string') headers[h] = header;
           }
         }
+
         if (this.options.forceChunkedRequest) {
           delete headers['content-length'];
         }
@@ -402,10 +588,18 @@ class OpsiHTTPProxy {
           path: ctx.clientToProxyRequest.url!,
           host: hostPort.host,
           port: hostPort.port,
-          headers,
+          headers: headers,
           agent: ctx.isSSL ? opsiproxy_ref.httpsAgent : opsiproxy_ref.httpAgent
         };
 
+        // iterate through request plugins
+        if (opsiproxy_ref?.options?.plugins) {
+          for (let idx = 0; idx < opsiproxy_ref.options.plugins.length; idx++) {
+            const plugin = opsiproxy_ref.options.plugins[idx];
+            if (!plugin.onRequest) continue;
+          }
+        }
+          */
         debugger;
       }
     );
@@ -1866,7 +2060,10 @@ class OpsiHTTPProxy {
 
 export {
   OpsiHTTPProxy,
+  OpsiproxyRequestContext,
   opsiproxy_plugin_info_t,
   opsiproxy_plugin_t,
-  opsiproxy_options_t
+  plugin_method_ret_t,
+  opsiproxy_options_t,
+  opsiproxy_socket_i
 };

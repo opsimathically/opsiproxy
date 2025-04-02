@@ -8,70 +8,82 @@ import path from 'node:path';
 import http from 'node:http';
 import https from 'node:https';
 
+import axios, { AxiosResponse } from 'axios';
+import { HttpsProxyAgent } from 'https-proxy-agent';
+import { HttpProxyAgent } from 'http-proxy-agent';
+
 import {
   OpsiHTTPProxy,
+  OpsiproxyRequestContext,
   opsiproxy_options_t,
   opsiproxy_plugin_info_t,
-  opsiproxy_plugin_t
+  opsiproxy_plugin_t,
+  plugin_method_ret_t
 } from '@src/proxies/http/proxy';
 
 // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 // %%% Utilities %%%%%%%%%%%%%%%%%%%%%%%%%%
 // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-async function makeProxiedRequest(
-  method: 'GET' | 'POST',
-  path: string,
-  proxy_host: string,
-  proxy_port: number,
-  target_host: string,
-  target_port: number,
-  data?: string
-): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const target_url = `http://${target_host}:${target_port}${path}`;
+async function makeProxiedRequest(params: {
+  proxy_url: string;
+  request_url: string;
+  method: 'GET' | 'POST';
+  data: any;
+}): Promise<AxiosResponse> {
+  let response: AxiosResponse;
 
-    const req_options: http.RequestOptions = {
-      host: proxy_host,
-      port: proxy_port,
-      method,
-      path: target_url,
-      headers: {
-        Host: `${target_host}:${target_port}`
-      }
-    };
+  /*
+  // parse url and select agent based on protocol
+  const parsed_request_url = new URL(params.request_url);
+  let https_agent = new HttpsProxyAgent(params.proxy_url);
+  switch (parsed_request_url.protocol) {
+    case 'http:':
+      agent = new HttpProxyAgent(params.proxy_url);
+      break;
+    case 'https:':
+      agent = new HttpsProxyAgent(params.proxy_url);
+      break;
+    default:
+      return null as unknown as AxiosResponse;
+  }
+  */
 
-    if (method === 'POST' && data) {
-      req_options.headers = {
-        ...req_options.headers,
-        'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(data)
-      };
-    }
-
-    const req = http.request(req_options, (res) => {
-      let response_data = '';
-
-      res.on('data', (chunk) => {
-        response_data += chunk;
+  switch (params.method) {
+    case 'GET':
+      response = await axios.get(params.request_url, {
+        proxy: {
+          protocol: 'http',
+          host: '127.0.0.1',
+          port: 8080
+        }
       });
+      return response;
 
-      res.on('end', () => {
-        resolve(response_data);
+    case 'POST':
+      response = await axios.post(params.request_url, params.data, {
+        proxy: {
+          protocol: 'http',
+          host: '127.0.0.1',
+          port: 8080
+        },
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json'
+        }
       });
-    });
+      return response;
+      break;
+    default:
+      break;
+  }
 
-    req.on('error', (err) => {
-      reject(err);
-    });
-
-    if (method === 'POST' && data) {
-      req.write(data);
-    }
-
-    req.end();
-  });
+  return null as unknown as AxiosResponse;
 }
+
+// %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+// %%% Test Proxy Plugins %%%%%%%%%%%%%%%%%
+// %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 class TestHttpProxyPlugin implements opsiproxy_plugin_t {
   info: opsiproxy_plugin_info_t = {
@@ -81,6 +93,19 @@ class TestHttpProxyPlugin implements opsiproxy_plugin_t {
 
   constructor() {}
 
+  async clientToProxy_onConnection?(params: {
+    ctx: OpsiproxyRequestContext;
+  }): Promise<plugin_method_ret_t | undefined> {
+    // terminate the context
+    return {
+      behavior: 'end'
+    };
+  }
+
+  async onRequest(params: {
+    opsiproxy_ref: OpsiHTTPProxy;
+    request_context: OpsiproxyRequestContext;
+  }) {}
   /*
   async onError() {}
   async onConnect() {}
@@ -198,15 +223,12 @@ class TestHttpProxyPlugin implements opsiproxy_plugin_t {
     // %%% Make Dummy Request %%%%%%%%%%%%%
     // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-    const post_result = await makeProxiedRequest(
-      'POST',
-      '/posthere',
-      '127.0.0.1',
-      8080,
-      '127.0.0.1',
-      dummy_server_listen_port,
-      JSON.stringify({ hello: 'there' })
-    );
+    const proxy_get_response = await makeProxiedRequest({
+      proxy_url: 'http://127.0.0.1:8080',
+      request_url: `http://127.0.0.1:${dummy_server_listen_port}/getthere`,
+      method: 'GET',
+      data: null
+    });
 
     // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
     // %%% Close Servers %%%%%%%%%%%%%%%%%%
