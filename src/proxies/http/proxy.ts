@@ -19,6 +19,7 @@ import * as fs_promises from 'fs/promises';
 import async from 'async';
 import type { AddressInfo } from 'net';
 import net from 'net';
+
 import type {
   Server as HTTPServer,
   IncomingHttpHeaders,
@@ -349,6 +350,25 @@ class OpsiHTTPProxy {
     // set self reference
     const opsiproxy_ref = this;
 
+    // Create the HTTP server (but don't call .listen() on it)
+    const httpServer = new http.Server((req, res) => {
+      debugger;
+      res.writeHead(200);
+      res.end('Hello after delayed resume!');
+    });
+
+    const server = net.createServer((socket) => {
+      debugger;
+      httpServer.emit('connection', socket);
+    });
+
+    const deferral: Deferred = new Deferred();
+    server.listen(8080, () => {
+      deferral.resolve(true);
+    });
+    await deferral.promise;
+    return;
+
     // set options
     const options = opsiproxy_ref.options;
     opsiproxy_ref.httpPort = options.httpPort;
@@ -424,13 +444,16 @@ class OpsiHTTPProxy {
       }
     );
 
-    opsiproxy_ref.httpServer.on(
-      'connection',
-      async (socket: opsiproxy_socket_i) => {
+    opsiproxy_ref.httpServer.on('connection', (socket: opsiproxy_socket_i) => {
+      // pause the socket
+      socket.pause();
+
+      /*
         // set socket uuid on connection
         socket.uuid = randomGuid();
         // create new context and immediately pause the request
         const ctx = new OpsiproxyRequestContext();
+        ctx.stage.push('client_to_proxy__connection');
         ctx.opsiproxy_ref = opsiproxy_ref;
         ctx.socket = socket;
         ctx.uuid = socket.uuid;
@@ -465,19 +488,23 @@ class OpsiHTTPProxy {
               plugin_result.behavior
             );
 
-            if (plugin_result.behavior === 'handled') break;
+            if (plugin_result.behavior === 'go_next_stage') break;
+            if (plugin_result.behavior === 'handled') return;
             if (plugin_result.behavior === 'continue') continue;
             if (plugin_result.behavior === 'end') {
+              socket.destroy();
               socket.deferral.resolve(false);
               return;
             }
           }
         }
 
-        socket.deferral.resolve(true);
-        debugger;
-      }
-    );
+        // resume the socket after paused
+        // socket.resume();
+        // socket.deferral.resolve(true);
+        // debugger;
+        */
+    });
 
     // handle client->opsiproxy requests
     // self.httpServer!.on('request', self._onHttpServerRequest.bind(self, false));
@@ -489,6 +516,7 @@ class OpsiHTTPProxy {
           req: IncomingMessage;
         }
       ) => {
+        debugger;
         const opsiproxy_socket: opsiproxy_socket_i =
           clientToProxyRequest.socket as opsiproxy_socket_i;
 
@@ -502,7 +530,6 @@ class OpsiHTTPProxy {
           return;
         }
 
-        debugger;
         const request_socket_uuid = (
           clientToProxyRequest.socket as opsiproxy_socket_i
         ).uuid;
@@ -517,6 +544,9 @@ class OpsiHTTPProxy {
           proxyToClientResponse.end();
           return;
         }
+
+        ctx.stage.push('client_to_proxy__request');
+        debugger;
 
         ctx.setHttpEventFlag('request_context_is_valid', true);
 

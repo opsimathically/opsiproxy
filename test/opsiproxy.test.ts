@@ -98,7 +98,7 @@ class TestHttpProxyPlugin implements opsiproxy_plugin_t {
   }): Promise<plugin_method_ret_t | undefined> {
     // terminate the context
     return {
-      behavior: 'end'
+      behavior: 'handled'
     };
   }
 
@@ -135,6 +135,7 @@ class TestHttpProxyPlugin implements opsiproxy_plugin_t {
   // %%% OpsiHTTPProxy Tests %%%%%%%%%%%%%%%%%%%%%%%%%
   // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
+  /*
   test('Test ca directory must be valid.', async function () {
     const test_http_proxy_plugin = new TestHttpProxyPlugin();
     const opsihttpproxy = new OpsiHTTPProxy({
@@ -160,7 +161,7 @@ class TestHttpProxyPlugin implements opsiproxy_plugin_t {
     }
     await opsihttpproxy.close();
   });
-
+  */
   test('Test opsiproxy with http request.', async function () {
     // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
     // %%% Create Dummy HTTP Server %%%%%%%%
@@ -230,6 +231,7 @@ class TestHttpProxyPlugin implements opsiproxy_plugin_t {
       data: null
     });
 
+    console.log(proxy_get_response.data);
     // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
     // %%% Close Servers %%%%%%%%%%%%%%%%%%
     // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%

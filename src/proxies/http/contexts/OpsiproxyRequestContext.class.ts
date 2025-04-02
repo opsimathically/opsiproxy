@@ -37,6 +37,7 @@ class OpsiproxyRequestContext {
   opsiproxy_ref!: OpsiHTTPProxy;
   plugin_activations: plugin_activation_info_t = {};
   plugin_activation_history: string[] = [];
+  stage: string[] = [];
   socket!: opsiproxy_socket_i;
   deferred_map: DeferredMap = new DeferredMap();
   uuid!: string;
