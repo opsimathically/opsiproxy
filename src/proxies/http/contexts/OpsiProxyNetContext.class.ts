@@ -22,6 +22,11 @@ interface opsiproxy_http_incomming_message_i extends http.IncomingMessage {
   };
 }
 
+interface opsiproxy_http_proxy_to_client_response_message_i
+  extends http.ServerResponse<http.IncomingMessage> {
+  req: opsiproxy_http_incomming_message_i;
+}
+
 type plugin_activation_info_t = {
   [key: string]: {
     [key: string]: {
@@ -50,7 +55,7 @@ class OpsiProxyNetContext {
   connectRequest!: any;
   clientToProxyRequest!: opsiproxy_http_incomming_message_i;
   proxyToClientResponse!: any;
-  responseContentPotentiallyModified!: boolean;
+  responseContentPotentiallyModified: boolean = false;
 
   constructor() {}
 
@@ -85,7 +90,7 @@ class OpsiProxyNetContext {
     try {
       const parsed_host_as_url: URL = new URL('http://' + req.headers.host);
       req.parsed_host_header = {
-        host: parsed_host_as_url.host,
+        host: parsed_host_as_url.hostname,
         port: parseInt(parsed_host_as_url.port)
       };
     } catch (err) {}
@@ -142,4 +147,8 @@ class OpsiProxyNetContext {
   }
 }
 
-export { OpsiProxyNetContext, opsiproxy_http_incomming_message_i };
+export {
+  OpsiProxyNetContext,
+  opsiproxy_http_incomming_message_i,
+  opsiproxy_http_proxy_to_client_response_message_i
+};

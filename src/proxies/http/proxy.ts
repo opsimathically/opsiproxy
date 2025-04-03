@@ -10,10 +10,16 @@ import IterAsync from '@opsimathically/iterasync';
 import { Deferred, DeferredMap } from '@opsimathically/deferred';
 import {
   OpsiProxyNetContext,
-  opsiproxy_http_incomming_message_i
+  opsiproxy_http_incomming_message_i,
+  opsiproxy_http_proxy_to_client_response_message_i
 } from '@src/proxies/http/contexts/OpsiProxyNetContext.class';
 
-import { OpsiProxyPluginRunner } from '@src/proxies/http/plugin_runner/OpsiProxyPluginRunner.class';
+import {
+  OpsiProxyPluginRunner,
+  opsiproxy_plugin_runner_run_info_t,
+  opsiproxy_plugin_activation_t,
+  opsiproxy_plugin_runner_routable_label_info_t
+} from '@src/proxies/http/plugin_runner/OpsiProxyPluginRunner.class';
 
 import { constants } from 'fs';
 import { access } from 'fs/promises';
@@ -84,8 +90,8 @@ type opsiproxy_plugin_info_t = {
  */
 type opsiproxy_plugin_method_ret_t = {
   /**
-   * end:
-   * Will call context end, destroying the entire context, stopping any further
+   * terminate_context:
+   * Will end the context, destroying it entirely, stopping any further
    * continuance.
    *
    * continue:
@@ -95,6 +101,10 @@ type opsiproxy_plugin_method_ret_t = {
    * go_next_stage:
    * Indicates that the plugin interacted with the context, and instructs the context to move to
    * the next stage in the proxying process.
+   *
+   * stop_at_this_stage:
+   * Will stop at this stage, assuming that the plugin will handle the rest of the stages
+   * itself.  Will not destroy the context, but will not progress further in stages.
    *
    * handled:
    * Asserts that the plugin has handled this stage of the connection/request.  No more
@@ -107,7 +117,13 @@ type opsiproxy_plugin_method_ret_t = {
    * The plugin had a relevant event handler present, and it was executed, but it did
    * not affect the context at all.  Will proceed to the next plugin.
    */
-  behavior: 'end' | 'continue' | 'handled' | 'noop' | 'go_next_stage';
+  behavior:
+    | 'terminate_context'
+    | 'continue_to_next_plugin'
+    | 'handled'
+    | 'noop'
+    | 'go_next_stage'
+    | 'stop_at_this_stage';
 };
 
 type opsiproxy_plugin_event_cb_t = (
@@ -135,6 +151,7 @@ interface opsiproxy_websocket_i extends WebSocket {
 interface opsiproxy_socket_i extends net.Socket {
   uuid?: string;
   deferral?: Deferred;
+  opsiproxy_net_ctx?: OpsiProxyNetContext;
 }
 
 type opsiproxy_options_t = {
@@ -372,6 +389,10 @@ class OpsiHTTPProxy {
     }
   }
 
+  // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+  // %%% Context Management %%%%%%%%%%%%%%%%%%%
+  // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
   // create a new context
   async createNetContext(
     socket: opsiproxy_socket_i
@@ -383,6 +404,7 @@ class OpsiHTTPProxy {
 
     // create new context and immediately pause the request
     const ctx = new OpsiProxyNetContext();
+    socket.opsiproxy_net_ctx = ctx;
     ctx.stage.push('client_to_proxy__connection');
     ctx.opsiproxy_ref = opsiproxy_ref;
     ctx.socket = socket;
@@ -393,6 +415,18 @@ class OpsiHTTPProxy {
     opsiproxy_ref.context_map.set(ctx.uuid, ctx);
     ctx.setHttpEventFlag('context_added_to_map', true);
     return ctx;
+  }
+
+  // Destroy context
+  async destroyContext(ctx: OpsiProxyNetContext) {
+    const opsiproxy_ref = this;
+
+    // remove the context from the map
+    // and destroy the socket associated.
+    opsiproxy_ref.context_map.delete(ctx.uuid);
+    ctx.socket.destroy();
+
+    return true;
   }
 
   async listen() {
@@ -480,7 +514,7 @@ class OpsiHTTPProxy {
 
     opsiproxy_ref.netServer.on('listening', async () => {
       // opsiproxy_ref.plugin_runner
-      debugger;
+      // debugger;
     });
 
     opsiproxy_ref.netServer.on('drop', async (data: net.DropArgument) => {
@@ -498,16 +532,41 @@ class OpsiHTTPProxy {
         //       will not trigger.
 
         // create and register a new context
-        const cxt = await opsiproxy_ref.createNetContext(socket);
+        const ctx = await opsiproxy_ref.createNetContext(socket);
 
         // run plugins
-        await opsiproxy_ref.plugin_runner.runPluginsBasedOnContext({
-          ctx: cxt,
-          opsiproxy_ref: opsiproxy_ref
-        });
+        const plugin_run_info: opsiproxy_plugin_runner_run_info_t =
+          await opsiproxy_ref.plugin_runner.runPluginsBasedOnContext({
+            ctx: ctx,
+            opsiproxy_ref: opsiproxy_ref
+          });
+
+        // check for bad values
+        if (plugin_run_info.plugin_route.proxy_server === 'unknown')
+          throw new Error('plugin_runner_reports_unknown_server_context');
+        if (plugin_run_info.plugin_route.proxy_server !== 'net')
+          throw new Error('plugin_runner_reports_wrong_server_context');
+
+        if (
+          plugin_run_info.net_server_behavior ===
+          'destroy_context_and_exit_stage'
+        ) {
+          await opsiproxy_ref.destroyContext(ctx);
+          socket.destroy();
+          return;
+        }
+
+        if (plugin_run_info.net_server_behavior === 'stop_at_this_stage') {
+        }
 
         // handle specific plugin behavior indicators
-        debugger;
+        // debugger;
+
+        // if the socket is paused, unpause it to move to the next stage
+        if (!socket.readableFlowing) socket.resume();
+
+        // emit connection event to the http server
+        opsiproxy_ref.httpServer.emit('connection', socket);
       }
     );
 
@@ -541,14 +600,15 @@ class OpsiHTTPProxy {
     opsiproxy_ref.httpServer.on(
       'connect',
       async (req: IncomingMessage, socket: stream.Duplex, head: Buffer) => {
+        const ctx = (req.socket as opsiproxy_socket_i).opsiproxy_net_ctx;
         debugger;
       }
     );
 
     opsiproxy_ref.httpServer.on('connection', (socket: opsiproxy_socket_i) => {
-      // pause the socket
-      // this is no longer necessary, we pause on connect
-      // socket.pause();
+      const ctx = socket.opsiproxy_net_ctx;
+      // debugger;
+
       /*
         // set socket uuid on connection
         socket.uuid = randomGuid();
@@ -613,59 +673,155 @@ class OpsiHTTPProxy {
       'request',
       async (
         clientToProxyRequest: opsiproxy_http_incomming_message_i,
-        proxyToClientResponse: ServerResponse<IncomingMessage> & {
-          req: IncomingMessage;
-        }
+        proxyToClientResponse: opsiproxy_http_proxy_to_client_response_message_i
       ) => {
-        debugger;
-        const opsiproxy_socket: opsiproxy_socket_i =
-          clientToProxyRequest.socket as opsiproxy_socket_i;
+        // gather context
+        const ctx = (clientToProxyRequest.socket as opsiproxy_socket_i)
+          .opsiproxy_net_ctx;
+        if (!ctx) throw new Error('request_with_no_context_is_unreasonable');
 
-        if (!opsiproxy_socket.deferral?.promise)
-          throw new Error('socket_did_not_contain_a_deferral');
-
-        // we need to wait for the socket deferral to resolve, this is how we
-        // force synchronization between our async plugin callbacks.
-        const deferral_result = await opsiproxy_socket.deferral.promise;
-        if (!deferral_result) {
-          return;
-        }
-
-        const request_socket_uuid = (
-          clientToProxyRequest.socket as opsiproxy_socket_i
-        ).uuid;
-        if (!request_socket_uuid) {
-          proxyToClientResponse.end();
-          return;
-        }
+        // proxyToClientResponse.end();
 
         // gather existing context from map
-        const ctx = opsiproxy_ref.context_map.get(request_socket_uuid);
-        if (!ctx) {
+        ctx.stage.push('http_server__client_to_proxy__request_recieved');
+        ctx.setHttpEventFlag('request_context_is_valid', true);
+
+        ctx.clientToProxyRequest = clientToProxyRequest;
+        ctx.proxyToClientResponse = proxyToClientResponse;
+
+        // request URL must always be parsable
+        if (!(await ctx.parseRequestURL(clientToProxyRequest))) {
+          ctx.clientToProxyRequestTerminate('unparsable request url', 502);
           proxyToClientResponse.end();
           return;
         }
 
-        ctx.stage.push('client_to_proxy__request');
-        debugger;
+        let host: string = '';
+        let port: number = -1;
+        if (await ctx.parseRequestHostHeader(clientToProxyRequest)) {
+          host = ctx.clientToProxyRequest.parsed_host_header.host;
+          port = ctx.clientToProxyRequest.parsed_host_header.port;
+        } else {
+          host = ctx.clientToProxyRequest.parsed_request_url.hostname;
+          port = parseInt(ctx.clientToProxyRequest.parsed_request_url.port);
+        }
 
-        ctx.setHttpEventFlag('request_context_is_valid', true);
+        // ensure the protocol is supported
+        if (
+          !['http:', 'https:', 'ws:', 'wss:'].includes(
+            ctx.clientToProxyRequest.parsed_request_url.protocol
+          )
+        ) {
+          ctx.clientToProxyRequestTerminate('unsupported protocol', 502);
+          proxyToClientResponse.end();
+          return;
+        }
 
-        debugger;
-        /*
-        ctx.clientToProxyRequest = clientToProxyRequest;
+        // pause the request
         ctx.clientToProxyRequest.pause();
-        ctx.isSSL = false;
-        ctx.proxyToClientResponse = proxyToClientResponse;
-        ctx.responseContentPotentiallyModified = false;
 
-        // attempt to parse url and host header
-        const request_url_parsed_ok =
-          await ctx.parseRequestURL(clientToProxyRequest);
-        const host_header_parsed_ok =
-          await ctx.parseRequestHostHeader(clientToProxyRequest);
-        */
         debugger;
+
+        const headers: http_headers_t = {};
+
+        // don't forward proxy-headers
+        for (const h in ctx.clientToProxyRequest.headers) {
+          if (!/^proxy-/i.test(h)) {
+            const header = ctx.clientToProxyRequest.headers[h];
+            if (typeof header === 'string')
+              if (typeof h === 'string') headers[h] = header;
+          }
+        }
+
+        // Choose http or https based on protocol
+        const transport =
+          ctx.clientToProxyRequest.parsed_request_url.protocol === 'https:'
+            ? https
+            : http;
+
+        debugger;
+        const proxyReq = transport.request(
+          {
+            hostname: host,
+            port: port,
+            path:
+              ctx.clientToProxyRequest.parsed_request_url.pathname +
+              ctx.clientToProxyRequest.parsed_request_url.search,
+            method: ctx.clientToProxyRequest.method,
+            headers: ctx.clientToProxyRequest.headers
+          },
+          (proxyRes) => {
+            // Write the headers and status from the destination to the client
+            proxyToClientResponse.writeHead(
+              proxyRes.statusCode || 500,
+              proxyRes.headers
+            );
+            // Pipe the response from target back to the client
+            proxyRes.pipe(proxyToClientResponse);
+          }
+        );
+
+        proxyReq.on('error', (err) => {
+          console.error('Proxy request error:', err);
+          proxyToClientResponse.writeHead(502);
+          proxyToClientResponse.end('Bad Gateway');
+        });
+
+        // Pipe the client request body to the destination
+        clientToProxyRequest.pipe(proxyReq);
+
+        /*
+
+        function makeProxyToServerRequest() {
+          const proto = ctx.isSSL ? https : http;
+          ctx.proxyToServerRequest = proto.request(
+            ctx.proxyToServerRequestOptions!,
+            proxyToServerRequestComplete
+          );
+          ctx.proxyToServerRequest.on(
+            'error',
+            self._onError.bind(self, 'PROXY_TO_SERVER_REQUEST_ERROR', ctx)
+          );
+          ctx.requestFilters.push(new ProxyFinalRequestFilter(self, ctx));
+          let prevRequestPipeElem = ctx.clientToProxyRequest;
+          ctx.requestFilters.forEach((filter) => {
+            filter.on(
+              'error',
+              self._onError.bind(self, 'REQUEST_FILTER_ERROR', ctx)
+            );
+            prevRequestPipeElem = prevRequestPipeElem.pipe(filter);
+          });
+          ctx.clientToProxyRequest.resume();
+        }
+
+        */
+
+        /*
+        if (this.options.forceChunkedRequest) {
+          delete headers['content-length'];
+        }
+
+        ctx.proxyToServerRequestOptions = {
+          method: ctx.clientToProxyRequest.method!,
+          path: ctx.clientToProxyRequest.url!,
+          host: hostPort.host,
+          port: hostPort.port,
+          headers,
+          agent: ctx.isSSL ? self.httpsAgent : self.httpAgent
+        };
+        return self._onRequest(ctx, (err) => {
+          if (err) {
+            return self._onError('ON_REQUEST_ERROR', ctx, err);
+          }
+          return self._onRequestHeaders(ctx, (err: Error | undefined | null) => {
+            if (err) {
+              return self._onError('ON_REQUESTHEADERS_ERROR', ctx, err);
+            }
+            return makeProxyToServerRequest();
+          });
+        });
+        */
+
         /*
         const hostPort = {
           host: '',
@@ -673,42 +829,6 @@ class OpsiHTTPProxy {
         };
 
 
-        // use host header by default, fallback to request
-        if (host_header_parsed_ok) {
-          hostPort.host = ctx.clientToProxyRequest.parsed_host_header.host;
-          hostPort.port = ctx.clientToProxyRequest.parsed_host_header.port;
-        } else if (request_url_parsed_ok) {
-        } else {
-        }
-
-        const hostPort = OpsiHTTPProxy.parseHostAndPort(
-          ctx.clientToProxyRequest,
-          ctx.isSSL ? 443 : 80
-        );
-
-        debugger;
-        // ensure hostPort was parsed ok
-        if (!hostPort) {
-          ctx.clientToProxyRequest.resume();
-          ctx.proxyToClientResponse.writeHead(400, {
-            'Content-Type': 'text/html; charset=utf-8'
-          });
-          ctx.proxyToClientResponse.end(
-            'Bad request: Host missing...',
-            'utf-8'
-          );
-          return;
-        }
-
-        const headers: http_headers_t = {};
-        for (const h in ctx.clientToProxyRequest.headers) {
-          // don't forward proxy-headers
-          if (!/^proxy-/i.test(h)) {
-            const header = ctx.clientToProxyRequest.headers[h];
-            if (typeof header === 'string')
-              if (typeof h === 'string') headers[h] = header;
-          }
-        }
 
         if (this.options.forceChunkedRequest) {
           delete headers['content-length'];
@@ -731,7 +851,8 @@ class OpsiHTTPProxy {
           }
         }
           */
-        debugger;
+
+        // debugger;
       }
     );
 

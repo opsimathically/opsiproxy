@@ -97,7 +97,7 @@ class TestHttpProxyPlugin implements opsiproxy_plugin_t {
   async net_proxy__client_to_proxy__initial_connection(
     ctx: OpsiProxyNetContext
   ): Promise<opsiproxy_plugin_method_ret_t> {
-    debugger;
+    // debugger;
 
     const ret_data: opsiproxy_plugin_method_ret_t = {
       behavior: 'noop'
@@ -154,14 +154,14 @@ class TestHttpProxyPlugin implements opsiproxy_plugin_t {
           res.end('Not found');
           return;
         }
-        const parsedUrl = new URL(url);
-        if (method === 'GET' && parsedUrl.pathname === '/gethere') {
+
+        if (method === 'GET' && url === '/gethere') {
           res.writeHead(200, { 'Content-Type': 'text/plain' });
           res.end('HI!');
           return;
         }
 
-        if (method === 'POST' && parsedUrl.pathname === '/posthere') {
+        if (method === 'POST' && url === '/posthere') {
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ hello: 'there' }));
           return;
@@ -206,12 +206,14 @@ class TestHttpProxyPlugin implements opsiproxy_plugin_t {
 
     const proxy_get_response = await makeProxiedRequest({
       proxy_url: 'http://127.0.0.1:8080',
-      request_url: `http://127.0.0.1:${dummy_server_listen_port}/getthere`,
+      request_url: `http://127.0.0.1:${dummy_server_listen_port}/gethere`,
       method: 'GET',
       data: null
     });
 
     console.log(proxy_get_response.data);
+    debugger;
+
     // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
     // %%% Close Servers %%%%%%%%%%%%%%%%%%
     // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%

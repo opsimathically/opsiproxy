@@ -25,14 +25,14 @@ type opsiproxy_plugin_activation_t = {
 
 type opsiproxy_plugin_runner_run_info_t = {
   plugin_route: opsiproxy_plugin_runner_routable_label_info_t;
-  net_server_behavior: {
-    terminate: boolean;
-    continue: boolean;
-  };
-  http_server_behavior: {
-    terminate: boolean;
-    continue: boolean;
-  };
+  net_server_behavior:
+    | 'go_next_stage'
+    | 'stop_at_this_stage'
+    | 'destroy_context_and_exit_stage';
+  http_server_behavior:
+    | 'go_next_stage'
+    | 'stop_at_this_stage'
+    | 'destroy_context_and_exit_stage';
   activations: opsiproxy_plugin_activation_t[];
 };
 
@@ -50,19 +50,10 @@ class OpsiProxyPluginRunner {
         proxy_server: 'unknown',
         label: 'unknown_context_state'
       },
-      net_server_behavior: {
-        terminate: false,
-        continue: true
-      },
-      http_server_behavior: {
-        terminate: false,
-        continue: true
-      },
+      net_server_behavior: 'go_next_stage',
+      http_server_behavior: 'go_next_stage',
       activations: []
     };
-
-    // ensure we have plugins to run
-    if (!params?.opsiproxy_ref?.options?.plugins) return run_info;
 
     // Determine appropriate event context state to
     // find proper route to plugins.
@@ -104,23 +95,34 @@ class OpsiProxyPluginRunner {
         plugin as unknown as Record<string, opsiproxy_plugin_event_cb_t>
       )[routable_label_info.label](params.ctx);
 
+      // if the plugin did nothing, just go next
+      if (plugin_ret.behavior === 'noop') continue;
+
       // store the activation
       run_info.activations.push({
         plugin_name: plugin_info.name,
         activation: plugin_ret
       });
 
+      // if this was handled, just break and go to the next stage
+      if (plugin_ret.behavior === 'handled') break;
+
       switch (plugin_ret.behavior) {
-        case 'continue':
+        case 'continue_to_next_plugin':
           break;
-        case 'end':
+
+        case 'terminate_context':
+          run_info.net_server_behavior = 'destroy_context_and_exit_stage';
+          return run_info;
+
+        case 'stop_at_this_stage':
+          run_info.net_server_behavior = 'stop_at_this_stage';
           break;
+
         case 'go_next_stage':
-          break;
-        case 'handled':
-          break;
-        case 'noop':
-          break;
+          run_info.net_server_behavior = 'go_next_stage';
+          return run_info;
+
         default:
           break;
       }
@@ -158,4 +160,9 @@ class OpsiProxyPluginRunner {
   }
 }
 
-export { OpsiProxyPluginRunner };
+export {
+  OpsiProxyPluginRunner,
+  opsiproxy_plugin_runner_run_info_t,
+  opsiproxy_plugin_activation_t,
+  opsiproxy_plugin_runner_routable_label_info_t
+};
