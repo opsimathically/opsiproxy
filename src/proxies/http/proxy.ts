@@ -9,9 +9,11 @@ import { randomGuid } from '@opsimathically/randomdatatools';
 import IterAsync from '@opsimathically/iterasync';
 import { Deferred, DeferredMap } from '@opsimathically/deferred';
 import {
-  OpsiproxyRequestContext,
+  OpsiProxyNetContext,
   opsiproxy_http_incomming_message_i
-} from '@src/proxies/http/contexts/OpsiproxyRequestContext.class';
+} from '@src/proxies/http/contexts/OpsiProxyNetContext.class';
+
+import { OpsiProxyPluginRunner } from '@src/proxies/http/plugin_runner/OpsiProxyPluginRunner.class';
 
 import { constants } from 'fs';
 import { access } from 'fs/promises';
@@ -80,7 +82,7 @@ type opsiproxy_plugin_info_t = {
  * The return data from a plugin event handler.  It is instrumental in determining
  * how the proxy will behave with regards to context.
  */
-type plugin_method_ret_t = {
+type opsiproxy_plugin_method_ret_t = {
   /**
    * end:
    * Will call context end, destroying the entire context, stopping any further
@@ -108,40 +110,14 @@ type plugin_method_ret_t = {
   behavior: 'end' | 'continue' | 'handled' | 'noop' | 'go_next_stage';
 };
 
+type opsiproxy_plugin_event_cb_t = (
+  ctx: OpsiProxyNetContext
+) => Promise<opsiproxy_plugin_method_ret_t>;
+
 type opsiproxy_plugin_t = {
   info: opsiproxy_plugin_info_t;
 
-  // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-  // %%% Client To Proxy Events %%%%%%%
-  // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-
-  clientToProxy_onConnection?(params: {
-    ctx: OpsiproxyRequestContext;
-  }): Promise<plugin_method_ret_t | undefined>;
-
-  // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-  // %%% Proxy To Server Events %%%%%%%
-  // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-
-  onError?(): Promise<any>;
-  onConnect?(): Promise<any>;
-  onRequestHeaders?(): Promise<any>;
-  onRequest?(params: {
-    opsiproxy_ref: OpsiHTTPProxy;
-    request_context: OpsiproxyRequestContext;
-  }): Promise<any>;
-  onWebSocketConnection?(): Promise<any>;
-  onWebSocketSend?(): Promise<any>;
-  onWebSocketMessage?(): Promise<any>;
-  onWebSocketFrame?(): Promise<any>;
-  onWebSocketClose?(): Promise<any>;
-  onWebSocketError?(): Promise<any>;
-  onRequestData?(): Promise<any>;
-  onRequestEnd?(): Promise<any>;
-  onResponse?(): Promise<any>;
-  onResponseHeaders?(): Promise<any>;
-  onResponseData?(): Promise<any>;
-  onResponseEnd?(): Promise<any>;
+  net_proxy__client_to_proxy__initial_connection?: opsiproxy_plugin_event_cb_t;
 };
 
 type HandlerType<T extends (...args: any[]) => any> = Array<Parameters<T>[0]>;
@@ -285,8 +261,12 @@ class OpsiHTTPProxy {
   plugins: opsiproxy_plugin_t[] = [];
   */
 
+  // node-http-proxy-plugins (old)
   static wildcard = wildcard;
   static gunzip = gunzip;
+
+  // plugin runner
+  plugin_runner: OpsiProxyPluginRunner = new OpsiProxyPluginRunner();
 
   // certficate authority
   ca!: ca;
@@ -295,9 +275,9 @@ class OpsiHTTPProxy {
   connectRequests: Record<string, http.IncomingMessage> = {};
 
   // a map of all request contexts
-  context_map: Map<string, OpsiproxyRequestContext> = new Map<
+  context_map: Map<string, OpsiProxyNetContext> = new Map<
     string,
-    OpsiproxyRequestContext
+    OpsiProxyNetContext
   >();
 
   // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -392,25 +372,44 @@ class OpsiHTTPProxy {
     }
   }
 
+  // create a new context
+  async createNetContext(
+    socket: opsiproxy_socket_i
+  ): Promise<OpsiProxyNetContext> {
+    const opsiproxy_ref = this;
+
+    // set socket uuid on connection
+    socket.uuid = randomGuid();
+
+    // create new context and immediately pause the request
+    const ctx = new OpsiProxyNetContext();
+    ctx.stage.push('client_to_proxy__connection');
+    ctx.opsiproxy_ref = opsiproxy_ref;
+    ctx.socket = socket;
+    ctx.uuid = socket.uuid;
+    ctx.setHttpEventFlag('connection', true);
+
+    // add context to the context map
+    opsiproxy_ref.context_map.set(ctx.uuid, ctx);
+    ctx.setHttpEventFlag('context_added_to_map', true);
+    return ctx;
+  }
+
   async listen() {
     // set self reference
     const opsiproxy_ref = this;
-
-    // set options
-    const options = opsiproxy_ref.options;
 
     // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
     // %%% Certificate Authority %%%%%%%%%%%%%%%%%%%%%
     // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
     // always ensure the ca directory exists
-
     if (
       !(await opsiproxy_ref.isWritableDirectory(opsiproxy_ref.options.sslCaDir))
-    ) {
+    )
       throw new Error('opsiproxy_ssl_ca_dir_is_invalid');
-    }
 
+    // create the ca
     const ca_deferral: Deferred = new Deferred();
     ca.create(
       opsiproxy_ref.options.sslCaDir,
@@ -422,48 +421,33 @@ class OpsiHTTPProxy {
         ca_deferral.resolve(ca);
       }
     );
-    const certificate_authority: ca = await ca_deferral.promise;
-    opsiproxy_ref.ca = certificate_authority;
+    opsiproxy_ref.ca = await ca_deferral.promise;
 
     opsiproxy_ref.sslServers = {};
     opsiproxy_ref.sslSemaphores = {};
     opsiproxy_ref.connectRequests = {};
 
-    // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-    // %%% HTTP Server/Event Handlers %%%%%%%%%
-    // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-
-    // TOMORROW TOMORROW TOMORROW TOMORROW TOMORROW
-    // TOMORROW TOMORROW TOMORROW TOMORROW TOMORROW
-    // TOMORROW TOMORROW TOMORROW TOMORROW TOMORROW
-    // TOMORROW TOMORROW TOMORROW TOMORROW TOMORROW
-    // Return here, replace existing http server with this http server.
-    // Do not worry about browser/client encryption, stunnel is the
-    // solution there.
-
-    // This is effectively the
-    /*
-    const httpServer = new http.Server((req, res) => {
-      debugger;
-      res.writeHead(200);
-      res.end('Hello after delayed resume!');
-    });
-    */
+    // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+    // %%% Net/HTTP Proxy Servers %%%%%%%%%%%%%%%%%%%
+    // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
     opsiproxy_ref.httpServer = new http.Server();
     opsiproxy_ref.httpServer.timeout = opsiproxy_ref.options.timeout;
 
     // create server
-    opsiproxy_ref.netServer = net.createServer(
-      {
-        pauseOnConnect: true,
-        blockList: opsiproxy_ref.options.proxy_incomming_block_list
-      },
+    opsiproxy_ref.netServer = net.createServer({
+      pauseOnConnect: true,
+      blockList: opsiproxy_ref.options.proxy_incomming_block_list
+    });
+
+    /*
+    ,
       async (socket) => {
         debugger;
+        // socket.resume();
         opsiproxy_ref.httpServer.emit('connection', socket);
       }
-    );
+    */
 
     // ensure servers were created ok
     if (!opsiproxy_ref.netServer)
@@ -471,7 +455,8 @@ class OpsiHTTPProxy {
     if (!opsiproxy_ref.httpServer)
       throw new Error('opsiproxy_could_not_create_proxy_http_server');
 
-    // setup proxy server and websocket
+    // setup event handlers
+    await opsiproxy_ref.setupNetProxyServerEventHandlers();
     await opsiproxy_ref.setupHttpProxyServerEventHandlers();
     await opsiproxy_ref.setupHttpProxyWebsocketServerEventHandlers();
 
@@ -489,6 +474,50 @@ class OpsiHTTPProxy {
     return await deferral.promise;
   }
 
+  async setupNetProxyServerEventHandlers() {
+    // set self reference
+    const opsiproxy_ref = this;
+
+    opsiproxy_ref.netServer.on('listening', async () => {
+      // opsiproxy_ref.plugin_runner
+      debugger;
+    });
+
+    opsiproxy_ref.netServer.on('drop', async (data: net.DropArgument) => {
+      debugger;
+    });
+
+    opsiproxy_ref.netServer.on('close', async () => {
+      debugger;
+    });
+
+    opsiproxy_ref.netServer.on(
+      'connection',
+      async (socket: opsiproxy_socket_i) => {
+        // Note: Socket is paused initially.  It must be resumed or the http server events
+        //       will not trigger.
+
+        // create and register a new context
+        const cxt = await opsiproxy_ref.createNetContext(socket);
+
+        // run plugins
+        await opsiproxy_ref.plugin_runner.runPluginsBasedOnContext({
+          ctx: cxt,
+          opsiproxy_ref: opsiproxy_ref
+        });
+
+        // handle specific plugin behavior indicators
+        debugger;
+      }
+    );
+
+    opsiproxy_ref.netServer.on('error', (err: Error) => {
+      debugger;
+    });
+
+    return true;
+  }
+
   async setupHttpProxyServerEventHandlers() {
     // set self reference
     const opsiproxy_ref = this;
@@ -497,11 +526,15 @@ class OpsiHTTPProxy {
     // self.httpServer!.on('connect', self._onHttpServerConnect.bind(self));
 
     // when the http server itself closes, not the request or connection
-    opsiproxy_ref.httpServer.on('close', async () => {});
+    opsiproxy_ref.httpServer.on('close', async () => {
+      debugger;
+    });
 
     opsiproxy_ref.httpServer.on(
       'dropRequest',
-      async (request: http.IncomingMessage, socket: stream.Duplex) => {}
+      async (request: http.IncomingMessage, socket: stream.Duplex) => {
+        debugger;
+      }
     );
 
     // NOTE: For people reading this code, this is the CONNECT method, not the socket connecting.
@@ -514,8 +547,8 @@ class OpsiHTTPProxy {
 
     opsiproxy_ref.httpServer.on('connection', (socket: opsiproxy_socket_i) => {
       // pause the socket
-      socket.pause();
-
+      // this is no longer necessary, we pause on connect
+      // socket.pause();
       /*
         // set socket uuid on connection
         socket.uuid = randomGuid();
@@ -763,15 +796,10 @@ class OpsiHTTPProxy {
 
     // close/remove http server
     opsiproxy_ref.httpServer!.close();
-    delete opsiproxy_ref.httpServer;
 
     // close/remove https server
     if (opsiproxy_ref.httpsServer) {
       opsiproxy_ref.httpsServer.close();
-
-      delete opsiproxy_ref.httpsServer;
-      delete opsiproxy_ref.wssServer;
-
       opsiproxy_ref.sslServers = {};
     }
 
@@ -785,7 +813,6 @@ class OpsiHTTPProxy {
         delete opsiproxy_ref.sslServers[srvName];
       }
     }
-
     return true;
   }
 
@@ -2140,10 +2167,10 @@ class OpsiHTTPProxy {
 
 export {
   OpsiHTTPProxy,
-  OpsiproxyRequestContext,
   opsiproxy_plugin_info_t,
   opsiproxy_plugin_t,
-  plugin_method_ret_t,
+  opsiproxy_plugin_event_cb_t,
+  opsiproxy_plugin_method_ret_t,
   opsiproxy_options_t,
   opsiproxy_socket_i
 };

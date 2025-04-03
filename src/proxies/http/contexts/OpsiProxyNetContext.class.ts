@@ -33,7 +33,7 @@ type plugin_activation_info_t = {
   };
 };
 
-class OpsiproxyRequestContext {
+class OpsiProxyNetContext {
   opsiproxy_ref!: OpsiHTTPProxy;
   plugin_activations: plugin_activation_info_t = {};
   plugin_activation_history: string[] = [];
@@ -142,4 +142,4 @@ class OpsiproxyRequestContext {
   }
 }
 
-export { OpsiproxyRequestContext, opsiproxy_http_incomming_message_i };
+export { OpsiProxyNetContext, opsiproxy_http_incomming_message_i };

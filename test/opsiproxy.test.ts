@@ -12,13 +12,14 @@ import axios, { AxiosResponse } from 'axios';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import { HttpProxyAgent } from 'http-proxy-agent';
 
+import { OpsiProxyNetContext } from '@src/proxies/http/contexts/OpsiProxyNetContext.class';
+
 import {
   OpsiHTTPProxy,
-  OpsiproxyRequestContext,
   opsiproxy_options_t,
   opsiproxy_plugin_info_t,
   opsiproxy_plugin_t,
-  plugin_method_ret_t
+  opsiproxy_plugin_method_ret_t
 } from '@src/proxies/http/proxy';
 
 // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -93,37 +94,16 @@ class TestHttpProxyPlugin implements opsiproxy_plugin_t {
 
   constructor() {}
 
-  async clientToProxy_onConnection?(params: {
-    ctx: OpsiproxyRequestContext;
-  }): Promise<plugin_method_ret_t | undefined> {
-    // terminate the context
-    return {
-      behavior: 'handled'
-    };
-  }
+  async net_proxy__client_to_proxy__initial_connection(
+    ctx: OpsiProxyNetContext
+  ): Promise<opsiproxy_plugin_method_ret_t> {
+    debugger;
 
-  async onRequest(params: {
-    opsiproxy_ref: OpsiHTTPProxy;
-    request_context: OpsiproxyRequestContext;
-  }) {}
-  /*
-  async onError() {}
-  async onConnect() {}
-  async onRequestHeaders() {}
-  async onRequest() {}
-  async onWebSocketConnection() {}
-  async onWebSocketSend() {}
-  async onWebSocketMessage() {}
-  async onWebSocketFrame() {}
-  async onWebSocketClose() {}
-  async onWebSocketError() {}
-  async onRequestData() {}
-  async onRequestEnd() {}
-  async onResponse() {}
-  async onResponseHeaders() {}
-  async onResponseData() {}
-  async onResponseEnd() {}
-  */
+    const ret_data: opsiproxy_plugin_method_ret_t = {
+      behavior: 'noop'
+    };
+    return ret_data;
+  }
 }
 
 // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
