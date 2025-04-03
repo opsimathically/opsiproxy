@@ -429,6 +429,10 @@ class OpsiHTTPProxy {
     return true;
   }
 
+  // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+  // %%% Start Listener %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+  // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
   async listen() {
     // set self reference
     const opsiproxy_ref = this;
@@ -508,6 +512,10 @@ class OpsiHTTPProxy {
     return await deferral.promise;
   }
 
+  // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+  // %%% Event Handlers %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+  // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
   async setupNetProxyServerEventHandlers() {
     // set self reference
     const opsiproxy_ref = this;
@@ -530,6 +538,8 @@ class OpsiHTTPProxy {
       async (socket: opsiproxy_socket_i) => {
         // Note: Socket is paused initially.  It must be resumed or the http server events
         //       will not trigger.
+
+        // debugger;
 
         // create and register a new context
         const ctx = await opsiproxy_ref.createNetContext(socket);
@@ -577,6 +587,7 @@ class OpsiHTTPProxy {
     return true;
   }
 
+  // HTTP Proxy Server Event Handlers
   async setupHttpProxyServerEventHandlers() {
     // set self reference
     const opsiproxy_ref = this;
@@ -596,18 +607,39 @@ class OpsiHTTPProxy {
       }
     );
 
-    // NOTE: For people reading this code, this is the CONNECT method, not the socket connecting.
+    // This event is used for HTTPs.  When a proxy client tries to connect via https, this is where it goes,
+    // and it asks to create a socket, not to make a request.
     opsiproxy_ref.httpServer.on(
       'connect',
-      async (req: IncomingMessage, socket: stream.Duplex, head: Buffer) => {
+      async (
+        req: IncomingMessage,
+        client_socket: stream.Duplex,
+        head: Buffer
+      ) => {
         const ctx = (req.socket as opsiproxy_socket_i).opsiproxy_net_ctx;
         // debugger;
+
+        const [host, port] = req.url!.split(':');
+        const serverSocket = net.connect(Number(port), host, () => {
+          client_socket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+          // Pipe the initial buffered data, if any
+          if (head && head.length > 0) {
+            serverSocket.write(head);
+          }
+          // Tunnel data between client and target server
+          client_socket.pipe(serverSocket);
+          serverSocket.pipe(client_socket);
+        });
+
+        serverSocket.on('error', (err) => {
+          console.error(`Error connecting to ${host}:${port}`, err.message);
+          client_socket.end();
+        });
       }
     );
 
     opsiproxy_ref.httpServer.on('connection', (socket: opsiproxy_socket_i) => {
       const ctx = socket.opsiproxy_net_ctx;
-      // debugger;
 
       /*
         // set socket uuid on connection
@@ -675,6 +707,7 @@ class OpsiHTTPProxy {
         clientToProxyRequest: opsiproxy_http_incomming_message_i,
         proxyToClientResponse: opsiproxy_http_proxy_to_client_response_message_i
       ) => {
+        // debugger;
         // gather context
         const ctx = (clientToProxyRequest.socket as opsiproxy_socket_i)
           .opsiproxy_net_ctx;
@@ -720,7 +753,7 @@ class OpsiHTTPProxy {
         // pause the request
         ctx.clientToProxyRequest.pause();
 
-        debugger;
+        // debugger;
 
         const headers: http_headers_t = {};
 
@@ -739,7 +772,7 @@ class OpsiHTTPProxy {
             ? https
             : http;
 
-        debugger;
+        // debugger;
         const proxyReq = transport.request(
           {
             hostname: host,
