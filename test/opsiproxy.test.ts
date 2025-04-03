@@ -213,7 +213,19 @@ class TestHttpProxyPlugin implements opsiproxy_plugin_t {
 
     console.log(proxy_get_response.data);
     debugger;
+    /*
 
+    const https_response = await makeProxiedRequest({
+      proxy_url: 'http://127.0.0.1:8080',
+      request_url: `https://old.reddit.com/`,
+      method: 'GET',
+      data: null
+    });
+
+    console.log(https_response.data);
+    debugger;
+
+     */
     // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
     // %%% Close Servers %%%%%%%%%%%%%%%%%%
     // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%

@@ -601,7 +601,7 @@ class OpsiHTTPProxy {
       'connect',
       async (req: IncomingMessage, socket: stream.Duplex, head: Buffer) => {
         const ctx = (req.socket as opsiproxy_socket_i).opsiproxy_net_ctx;
-        debugger;
+        // debugger;
       }
     );
 
