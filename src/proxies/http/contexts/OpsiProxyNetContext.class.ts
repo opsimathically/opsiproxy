@@ -3,6 +3,17 @@
 /* eslint-disable no-empty */
 /* eslint-disable @typescript-eslint/no-this-alias */
 /* eslint-disable @typescript-eslint/no-unused-vars */
+
+// %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+// %%% OpsiProxyNetContext Class %%%%%%%%%%%%%%%%%%%%%%%%%%
+// %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+/*
+All contexts use this class as a base context.  This is created
+by the opsiproxy net server, and is associated with the original
+socket connection.
+*/
+
 import { randomGuid } from '@opsimathically/randomdatatools';
 import { Deferred, DeferredMap } from '@opsimathically/deferred';
 import { deepEqual } from 'node:assert';

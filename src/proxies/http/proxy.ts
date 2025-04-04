@@ -345,22 +345,6 @@ class OpsiHTTPProxy {
    */
   httpsServer!: https.Server;
 
-  /*
-  onConnectHandlers: HandlerType<IProxy['onConnect']>;
-  onErrorHandlers: HandlerType<IProxy['onError']>;
-  onRequestDataHandlers: HandlerType<IProxy['onRequestData']>;
-  onRequestEndHandlers: HandlerType<IProxy['onRequestEnd']>;
-  onRequestHandlers: HandlerType<IProxy['onRequest']>;
-  onRequestHeadersHandlers: HandlerType<IProxy['onRequestHeaders']>;
-  onResponseDataHandlers: HandlerType<IProxy['onResponseData']>;
-  onResponseEndHandlers: HandlerType<IProxy['onResponseEnd']>;
-  onResponseHandlers: HandlerType<IProxy['onResponse']>;
-  onResponseHeadersHandlers: HandlerType<IProxy['onResponseHeaders']>;
-  onWebSocketCloseHandlers: HandlerType<IProxy['onWebSocketClose']>;
-  onWebSocketConnectionHandlers: HandlerType<IProxy['onWebSocketConnection']>;
-  onWebSocketErrorHandlers: HandlerType<IProxy['onWebSocketError']>;
-  onWebSocketFrameHandlers: HandlerType<IProxy['onWebSocketFrame']>;
-  */
   options!: opsiproxy_options_t;
 
   // not sure what this is used for; wouldn't this be relevant only
