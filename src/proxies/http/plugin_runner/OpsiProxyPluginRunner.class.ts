@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
 /* eslint-disable @typescript-eslint/no-this-alias */
 /* eslint-disable no-debugger */
-import { OpsiProxyNetContext } from '@src/proxies/http/contexts/OpsiProxyNetContext.class';
+import { OpsiProxySocketContext } from '@src/proxies/http/contexts/socket_context/OpsiProxySocketContext.class';
 import {
   OpsiHTTPProxy,
   opsiproxy_plugin_info_t,
@@ -40,7 +40,7 @@ class OpsiProxyPluginRunner {
   constructor() {}
 
   async runPluginsBasedOnContext(params: {
-    ctx: OpsiProxyNetContext;
+    ctx: OpsiProxySocketContext;
     opsiproxy_ref: OpsiHTTPProxy;
   }): Promise<opsiproxy_plugin_runner_run_info_t> {
     const pluginrunner_ref = this;
@@ -137,7 +137,7 @@ class OpsiProxyPluginRunner {
 
   // Determine where to route the plugin runner based on available context stages
   async contextToRoutableLabel(
-    ctx: OpsiProxyNetContext
+    ctx: OpsiProxySocketContext
   ): Promise<opsiproxy_plugin_runner_routable_label_info_t> {
     const ret_data = {
       proxy_server: 'net',

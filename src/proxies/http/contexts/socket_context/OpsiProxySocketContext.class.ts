@@ -5,7 +5,7 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
 
 // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-// %%% OpsiProxyNetContext Class %%%%%%%%%%%%%%%%%%%%%%%%%%
+// %%% OpsiProxySocketContext Class %%%%%%%%%%%%%%%%%%%%%%%%%%
 // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 /*
@@ -17,6 +17,7 @@ socket connection.
 import { randomGuid } from '@opsimathically/randomdatatools';
 import { Deferred, DeferredMap } from '@opsimathically/deferred';
 import { deepEqual } from 'node:assert';
+import { EventEmitter } from 'node:stream';
 import http from 'node:http';
 
 import {
@@ -24,6 +25,18 @@ import {
   opsiproxy_socket_i,
   opsiproxy_plugin_t
 } from '@src/proxies/http/proxy';
+
+import {
+  OpsiProxyContext,
+  opsiproxy_context_position_indicator_t
+} from '@src/proxies/http/contexts/OpsiProxyContext.class';
+
+type opsiproxy_net_context_options_t = {
+  parent_ctx: OpsiProxyContext;
+  proxy: OpsiHTTPProxy;
+  socket: opsiproxy_socket_i;
+  position: opsiproxy_context_position_indicator_t;
+};
 
 interface opsiproxy_http_incomming_message_i extends http.IncomingMessage {
   parsed_request_url: URL;
@@ -73,7 +86,15 @@ type http_connect_request_handles_t = {
   remote_server_to_proxy_response?: opsiproxy_http_proxy_to_client_response_message_i;
 };
 
-class OpsiProxyNetContext {
+class OpsiProxySocketContext extends EventEmitter {
+  uuid: string;
+
+  // mark as a socket context
+  type: string = 'socket_ctx';
+
+  position: opsiproxy_context_position_indicator_t = 'unknown';
+
+  parent_ctx: OpsiProxyContext;
   opsiproxy_ref!: OpsiHTTPProxy;
 
   // determines context type
@@ -127,9 +148,6 @@ class OpsiProxyNetContext {
 
   deferred_map: DeferredMap = new DeferredMap();
 
-  // context global uuid
-  uuid!: string;
-
   // ssl specifier
   isSSL: boolean = false;
 
@@ -147,7 +165,58 @@ class OpsiProxyNetContext {
 
   dest_host_and_port!: { host: string; port: number };
 
-  constructor() {}
+  options: opsiproxy_net_context_options_t;
+
+  constructor(options: opsiproxy_net_context_options_t) {
+    super();
+
+    // preserve options
+    this.options = options;
+
+    // set position
+    this.position = options.position;
+
+    // set uuids
+    this.uuid = randomGuid();
+    this.options.socket.uuid = this.uuid;
+
+    // set parent context
+    this.parent_ctx = options.parent_ctx;
+
+    // set contexts in socket so we can easily get their handles from the
+    // net/http server parameters.  This is primarily how we get handles to
+    // contexts in server callbacks.
+    options.socket.parent_ctx = options.parent_ctx;
+    options.socket.socket_ctx = this;
+  }
+
+  // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+  // %%% Socket Pause Controls %%%%%%%%%%%%%%%%%%%
+  // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+  socketIsPaused() {
+    const ctx_ref = this;
+    if (ctx_ref.options.socket.readableFlowing) return false;
+    return true;
+  }
+
+  pauseSocket() {
+    const ctx_ref = this;
+    if (ctx_ref.socketIsPaused()) return false;
+    ctx_ref.socket.pause();
+    return true;
+  }
+
+  resumeSocket() {
+    const ctx_ref = this;
+    if (!ctx_ref.socketIsPaused()) return false;
+    ctx_ref.socket.resume();
+    return true;
+  }
+
+  // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+  // %%% Old Old Old %%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+  // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
   // end the context (behavior depends on http event state)
   async end(params: any) {
@@ -300,7 +369,8 @@ class OpsiProxyNetContext {
 }
 
 export {
-  OpsiProxyNetContext,
+  OpsiProxySocketContext,
+  opsiproxy_net_context_options_t,
   opsiproxy_http_incomming_message_i,
   opsiproxy_http_proxy_to_client_response_message_i
 };

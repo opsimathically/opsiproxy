@@ -12,7 +12,7 @@ import axios, { AxiosResponse } from 'axios';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import { HttpProxyAgent } from 'http-proxy-agent';
 
-import { OpsiProxyNetContext } from '@src/proxies/http/contexts/OpsiProxyNetContext.class';
+import { OpsiProxySocketContext } from '@src/proxies/http/contexts/socket_context/OpsiProxySocketContext.class';
 
 import {
   OpsiHTTPProxy,
@@ -95,7 +95,7 @@ class TestHttpProxyPlugin implements opsiproxy_plugin_t {
   constructor() {}
 
   async net_proxy__client_to_proxy__initial_connection(
-    ctx: OpsiProxyNetContext
+    ctx: OpsiProxySocketContext
   ): Promise<opsiproxy_plugin_method_ret_t> {
     // debugger;
 

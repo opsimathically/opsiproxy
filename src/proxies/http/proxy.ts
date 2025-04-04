@@ -5,57 +5,60 @@
 /* eslint-disable @typescript-eslint/no-this-alias */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-import { EventEmitter } from 'stream';
-import { randomGuid } from '@opsimathically/randomdatatools';
-import IterAsync from '@opsimathically/iterasync';
-import { Deferred, DeferredMap } from '@opsimathically/deferred';
-import {
-  OpsiProxyNetContext,
-  opsiproxy_http_incomming_message_i,
-  opsiproxy_http_proxy_to_client_response_message_i
-} from '@src/proxies/http/contexts/OpsiProxyNetContext.class';
+// %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+// %%% Node Core %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+// %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-import {
-  OpsiProxyPluginRunner,
-  opsiproxy_plugin_runner_run_info_t,
-  opsiproxy_plugin_activation_t,
-  opsiproxy_plugin_runner_routable_label_info_t
-} from '@src/proxies/http/plugin_runner/OpsiProxyPluginRunner.class';
-
-// import context processors
-import { OpsiProxyTunnelContextProcessor } from '@src/proxies/http/contexts/tunnelling_request_context_processor/OpsiProxyTunnelContextProcessor.class';
-import { OpsiProxyForwardRequestContextProcessor } from '@src/proxies/http/contexts/forward_request_context_processor/OpsiProxyForwardRequestContextProcessor.class';
-
-import { constants } from 'fs';
-import { access } from 'fs/promises';
-import * as fs_promises from 'fs/promises';
-import async from 'async';
-import type { AddressInfo } from 'net';
-import net from 'net';
+import { EventEmitter } from 'node:stream';
+import { constants } from 'node:fs';
+import { access } from 'node:fs/promises';
+import * as fs_promises from 'node:fs/promises';
+import type { AddressInfo } from 'node:net';
+import net from 'node:net';
 
 import type {
   Server as HTTPServer,
   IncomingHttpHeaders,
   IncomingMessage,
   ServerResponse
-} from 'http';
-import http from 'http';
-import type { Server, ServerOptions } from 'https';
-import https from 'https';
-import fs from 'fs';
-import path from 'path';
+} from 'node:http';
+import http from 'node:http';
+import type { Server, ServerOptions } from 'node:https';
+import https from 'node:https';
+import fs from 'node:fs';
+import path from 'node:path';
+import url from 'node:url';
+import type stream from 'node:stream';
+import { SecureContextOptions } from 'node:tls';
+
+// %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+// %%% NPM External Packages %%%%%%%%%%%%%%%%%%%%%%%%
+// %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+import async from 'async';
 import type { WebSocket as WebSocketType } from 'ws';
 import WebSocket, { WebSocketServer } from 'ws';
-
-import url from 'url';
 import semaphore from 'semaphore';
-import ca from './ca';
-import { ProxyFinalResponseFilter } from './ProxyFinalResponseFilter';
-import { ProxyFinalRequestFilter } from './ProxyFinalRequestFilter';
 import { v4 as uuid } from 'uuid';
 
+// %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+// %%% Opsimathically External Packages %%%%%%%%%%%%%
+// %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+import { randomGuid } from '@opsimathically/randomdatatools';
+import IterAsync from '@opsimathically/iterasync';
+import { Deferred, DeferredMap } from '@opsimathically/deferred';
+
+// %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+// %%% node-http-mitm-proxy Imports %%%%%%%%%%%%%%%%%
+// %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+import { ProxyFinalResponseFilter } from './ProxyFinalResponseFilter';
+import { ProxyFinalRequestFilter } from './ProxyFinalRequestFilter';
+import ca from './ca';
 import gunzip from './middleware/gunzip';
 import wildcard from './middleware/wildcard';
+
 import type {
   ICertDetails,
   IContext,
@@ -80,10 +83,39 @@ import type {
   IWebSocketCallback,
   OnRequestDataCallback
 } from './types';
-import type stream from 'node:stream';
-import { SecureContextOptions } from 'tls';
+
 export { wildcard, gunzip };
 
+// %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+// %%% OpsiProxy Imports %%%%%%%%%%%%%%%%%%%%%%%%%%%%
+// %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+import {
+  OpsiProxyContext,
+  opsiproxy_context_options_t
+} from '@src/proxies/http/contexts/OpsiProxyContext.class';
+
+import {
+  OpsiProxySocketContext,
+  opsiproxy_http_incomming_message_i,
+  opsiproxy_http_proxy_to_client_response_message_i
+} from '@src/proxies/http/contexts/socket_context/OpsiProxySocketContext.class';
+
+import { OpsiProxyTunnelContext } from '@src/proxies/http/contexts/tunnelling_request_context/OpsiProxyTunnelContext.class';
+import { OpsiProxyForwardRequestContext } from '@src/proxies/http/contexts/forward_request_context/OpsiProxyForwardRequestContext.class';
+
+import {
+  OpsiProxyPluginRunner,
+  opsiproxy_plugin_runner_run_info_t,
+  opsiproxy_plugin_activation_t,
+  opsiproxy_plugin_runner_routable_label_info_t
+} from '@src/proxies/http/plugin_runner/OpsiProxyPluginRunner.class';
+
+// import context processors
+
+// %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+// %%% OpsiProxy Type Definitions %%%%%%%%%%%%%%%%%%%
+// %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 type opsiproxy_plugin_info_t = {
   name: string;
   description: string;
@@ -132,7 +164,7 @@ type opsiproxy_plugin_method_ret_t = {
 };
 
 type opsiproxy_plugin_event_cb_t = (
-  ctx: OpsiProxyNetContext
+  ctx: OpsiProxySocketContext
 ) => Promise<opsiproxy_plugin_method_ret_t>;
 
 type opsiproxy_plugin_t = {
@@ -155,8 +187,8 @@ interface opsiproxy_websocket_i extends WebSocket {
 
 interface opsiproxy_socket_i extends net.Socket {
   uuid?: string;
-  deferral?: Deferred;
-  opsiproxy_net_ctx?: OpsiProxyNetContext;
+  parent_ctx?: OpsiProxyContext;
+  socket_ctx?: OpsiProxySocketContext;
 }
 
 type opsiproxy_options_t = {
@@ -220,44 +252,6 @@ type http_headers_t = Record<string, string>;
  * ws.upgradeReq no longer exists.  It was deemed insecure.  We need to as a result, extend a type from
  * WebSocket and utilize that, so that upgradeReq can be preserved.
  *
- * Change:
- * Update/remove callback additions.  My idea for these would be we define a plugin that
- * contains some or all of the following.  These would be executed on a context matching
- * method.
- *
- * [] onError
- * [] onConnect
- * [] onRequestHeaders
- * [] onRequest
- * [] onWebSocketConnection
- * [] onWebSocketSend
- * [] onWebSocketMessage
- * [] onWebSocketFrame
- * [] onWebSocketClose
- * [] onWebSocketError
- * [] onRequestData
- * [] onRequestEnd
- * [] onResponse
- * [] onResponseHeaders
- * [] onResponseData
- * [] onResponseEnd
- *
- * Change:
- * Update handlers to be more typed, extended with new features.
- * [] onConnectHandlers
- * [] onRequestHandlers
- * [] onRequestHeadersHandlers
- * [] onWebSocketConnectionHandlers
- * [] onWebSocketFrameHandlers
- * [] onWebSocketCloseHandlers
- * [] onWebSocketErrorHandlers
- * [] onErrorHandlers
- * [] onRequestDataHandlers
- * [] onRequestEndHandlers
- * [] onResponseHandlers
- * [] onResponseHeadersHandlers
- * [] onResponseDataHandlers
- * [] onResponseEndHandlers
  *
  * PERSONAL DESIRED CHANGES
  * ------------------------
@@ -314,9 +308,9 @@ class OpsiHTTPProxy extends EventEmitter {
   // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
   // a map of all request contexts
-  context_map: Map<string, OpsiProxyNetContext> = new Map<
+  context_map: Map<string, OpsiProxyContext> = new Map<
     string,
-    OpsiProxyNetContext
+    OpsiProxyContext
   >();
 
   // map of all mitm servers
@@ -365,22 +359,6 @@ class OpsiHTTPProxy extends EventEmitter {
   constructor(options: opsiproxy_options_t) {
     super();
     this.options = options;
-    /*
-    this.onConnectHandlers = [];
-    this.onRequestHandlers = [];
-    this.onRequestHeadersHandlers = [];
-    this.onWebSocketConnectionHandlers = [];
-    this.onWebSocketFrameHandlers = [];
-    this.onWebSocketCloseHandlers = [];
-    this.onWebSocketErrorHandlers = [];
-    this.onErrorHandlers = [];
-    this.onRequestDataHandlers = [];
-    this.onRequestEndHandlers = [];
-    this.onResponseHandlers = [];
-    this.onResponseHeadersHandlers = [];
-    this.onResponseDataHandlers = [];
-    this.onResponseEndHandlers = [];
-    */
     this.response_content_potentially_modified = false;
   }
 
@@ -423,32 +401,8 @@ class OpsiHTTPProxy extends EventEmitter {
   // %%% Context Management %%%%%%%%%%%%%%%%%%%
   // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-  // create a new context
-  async createNetContext(
-    socket: opsiproxy_socket_i
-  ): Promise<OpsiProxyNetContext> {
-    const opsiproxy_ref = this;
-
-    // set socket uuid on connection
-    socket.uuid = randomGuid();
-
-    // create new context and immediately pause the request
-    const ctx = new OpsiProxyNetContext();
-    socket.opsiproxy_net_ctx = ctx;
-    ctx.stage.push('client_to_proxy__connection');
-    ctx.opsiproxy_ref = opsiproxy_ref;
-    ctx.socket = socket;
-    ctx.uuid = socket.uuid;
-    ctx.setHttpEventFlag('connection', true);
-
-    // add context to the context map
-    opsiproxy_ref.context_map.set(ctx.uuid, ctx);
-    ctx.setHttpEventFlag('context_added_to_map', true);
-    return ctx;
-  }
-
   // Destroy context
-  async destroyContext(ctx: OpsiProxyNetContext) {
+  async destroyContext(ctx: OpsiProxySocketContext) {
     const opsiproxy_ref = this;
 
     // remove the context from the map
@@ -567,7 +521,7 @@ class OpsiHTTPProxy extends EventEmitter {
   // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
   async getHTTPsMITMCertificates(
-    ctx: OpsiProxyNetContext
+    ctx: OpsiProxySocketContext
   ): Promise<mitm_server_certs_t> {
     // set self reference
     const opsiproxy_ref = this;
@@ -635,7 +589,7 @@ class OpsiHTTPProxy extends EventEmitter {
   // This method will create a MITM server using our own certificate authority
   // suitable for proxying connections.
   async createHTTPsMITMServer(
-    ctx: OpsiProxyNetContext
+    ctx: OpsiProxySocketContext
   ): Promise<mitm_server_set_t> {
     // set self reference
     const opsiproxy_ref = this;
@@ -691,12 +645,14 @@ class OpsiHTTPProxy extends EventEmitter {
         client_to_proxy_request: opsiproxy_http_incomming_message_i,
         proxy_to_client_response: opsiproxy_http_proxy_to_client_response_message_i
       ) => {
+        /*
         const ctx = (client_to_proxy_request.socket as opsiproxy_socket_i)
-          .opsiproxy_net_ctx;
+          .opsiproxy_socket_ctx;
         if (!ctx) throw new Error('request_with_no_context_is_unreasonable');
 
         if (!client_to_proxy_request?.host_and_port?.host) return;
         if (!client_to_proxy_request?.host_and_port?.port) return;
+        */
         /*
         ctx_ref.proxy_to_client_response.writeHead(http_status_code, {
           'Content-Type': 'text/html; charset=utf-8'
@@ -705,14 +661,13 @@ class OpsiHTTPProxy extends EventEmitter {
         
         debugger;
         */
-
         /*
         proxy_to_client_response.writeHead(200, {
           'Content-Type': 'text/html; charset=utf-8'
         });
         proxy_to_client_response.end('MOOO', 'utf-8');
         */
-
+        /*
         // Choose http or https based on protocol
         const transport =
           ctx.client_to_proxy_request.parsed_request_url.protocol === 'https:'
@@ -750,6 +705,7 @@ class OpsiHTTPProxy extends EventEmitter {
         // Pipe the client request body to the destination
         client_to_proxy_request.pipe(proxyReq);
         return;
+        */
       }
     );
 
@@ -792,7 +748,7 @@ class OpsiHTTPProxy extends EventEmitter {
   }
 
   async handleHTTPsMITMDataStart(params: {
-    ctx: OpsiProxyNetContext;
+    ctx: OpsiProxySocketContext;
     client_socket: opsiproxy_socket_i;
     client_to_proxy_request: opsiproxy_http_incomming_message_i;
     head: Buffer;
@@ -907,55 +863,19 @@ class OpsiHTTPProxy extends EventEmitter {
     opsiproxy_ref.netServer.on(
       'connection',
       async (socket: opsiproxy_socket_i) => {
-        // Note: Socket is paused initially.  It must be resumed or the http server events
-        //       will not trigger.
-
-        // debugger;
-
-        // create and register a new context
-        const ctx = await opsiproxy_ref.createNetContext(socket);
-
-        // run plugins
-        const plugin_run_info: opsiproxy_plugin_runner_run_info_t =
-          await opsiproxy_ref.plugin_runner.runPluginsBasedOnContext({
-            ctx: ctx,
-            opsiproxy_ref: opsiproxy_ref
-          });
-
-        // check for bad values
-        if (plugin_run_info.plugin_route.proxy_server === 'unknown')
-          throw new Error('plugin_runner_reports_unknown_server_context');
-        if (plugin_run_info.plugin_route.proxy_server !== 'net')
-          throw new Error('plugin_runner_reports_wrong_server_context');
-
-        if (
-          plugin_run_info.net_server_behavior ===
-          'destroy_context_and_exit_stage'
-        ) {
-          await opsiproxy_ref.destroyContext(ctx);
-          socket.destroy();
-          return;
-        }
-
-        /*
-        socket.on('data', (data: Buffer) => {
-          debugger;
+        // create new context and set sub context
+        const ctx = new OpsiProxyContext({
+          proxy: opsiproxy_ref
         });
-        */
-
-        if (plugin_run_info.net_server_behavior === 'stop_at_this_stage') {
-        }
-
-        // handle specific plugin behavior indicators
-        // debugger;
-
-        /*
-        // if the socket is paused, unpause it to move to the next stage
-        if (!socket.readableFlowing) {
-          debugger;
-          socket.resume();
-        }
-        */
+        ctx.setSubContext({
+          position: 'client_to_proxy',
+          context: new OpsiProxySocketContext({
+            parent_ctx: ctx,
+            proxy: opsiproxy_ref,
+            socket: socket,
+            position: 'client_to_proxy'
+          })
+        });
 
         // emit connection event to the http server
         opsiproxy_ref.httpServer.emit('connection', socket);
@@ -998,20 +918,48 @@ class OpsiHTTPProxy extends EventEmitter {
         client_socket: opsiproxy_socket_i,
         head: Buffer
       ) => {
-        const ctx = (client_to_proxy_request.socket as opsiproxy_socket_i)
-          .opsiproxy_net_ctx;
+        // gather parent context from socket
+        const ctx = client_socket.parent_ctx;
+        const socket_ctx = client_socket.socket_ctx;
 
-        // we should always have a context at this point
-        if (!ctx) throw new Error('context_is_not_available_when_it_should_be');
+        // ensure we have contexts
+        if (!ctx || !socket_ctx) return;
 
-        // parse the request host and port
-        ctx.parseRequestHostAndPort(client_to_proxy_request);
+        // NOTE: We need to ensure that we have some head data so that we can
+        //       detect if the connection is encrypted or not.  If we don't have
+        //       head data, we need to wait for the client to send some.
 
         // often times, head is unset and we have to wait for data.  This is required
         // for us to be able to detect tls/ssl connections.
+        let actual_head = Buffer.from('');
         if (!head || head.length === 0) {
-          // we have to wait for data
           client_socket.once('data', async (data: Buffer) => {
+            // set head and create context
+            actual_head = data;
+            const tunnel_ctx = new OpsiProxyTunnelContext({
+              parent_ctx: ctx,
+              proxy: opsiproxy_ref,
+              position: 'client_to_proxy',
+              client_to_proxy: {
+                request: {
+                  socket_context: socket_ctx,
+                  message: client_to_proxy_request,
+                  head: actual_head
+                }
+              }
+            });
+            if (!tunnel_ctx) return;
+
+            // set sub context in parent
+            ctx.setSubContext({
+              position: 'client_to_proxy',
+              context: tunnel_ctx
+            });
+
+            // start the tunnel context processor
+            await tunnel_ctx.start();
+            debugger;
+            /*
             await opsiproxy_ref.handleHTTPsMITMDataStart({
               ctx: ctx,
               client_to_proxy_request: client_to_proxy_request,
@@ -1019,6 +967,7 @@ class OpsiHTTPProxy extends EventEmitter {
               head: head,
               head_from_socket_data: data
             });
+            */
           });
 
           client_socket.write('HTTP/1.1 200 OK\r\n');
@@ -1035,6 +984,31 @@ class OpsiHTTPProxy extends EventEmitter {
           return;
         }
 
+        const tunnel_ctx = new OpsiProxyTunnelContext({
+          parent_ctx: ctx,
+          proxy: opsiproxy_ref,
+          position: 'client_to_proxy',
+          client_to_proxy: {
+            request: {
+              socket_context: socket_ctx,
+              message: client_to_proxy_request,
+              head: head
+            }
+          }
+        });
+        if (!tunnel_ctx) return;
+
+        // set sub context in parent
+        ctx.setSubContext({
+          position: 'client_to_proxy',
+          context: tunnel_ctx
+        });
+
+        // start the tunnel context processor
+        await tunnel_ctx.start();
+
+        debugger;
+        /*
         await opsiproxy_ref.handleHTTPsMITMDataStart({
           ctx: ctx,
           client_socket: client_socket,
@@ -1042,10 +1016,11 @@ class OpsiHTTPProxy extends EventEmitter {
           head: head,
           head_from_socket_data: Buffer.from('')
         });
-
+        *
         // client_socket
         debugger;
         return;
+
         /*
         // gather existing context from map
         ctx.stage.push('http_server__client_to_proxy__request_recieved');
@@ -1178,8 +1153,7 @@ class OpsiHTTPProxy extends EventEmitter {
     );
 
     opsiproxy_ref.httpServer.on('connection', (socket: opsiproxy_socket_i) => {
-      const ctx = socket.opsiproxy_net_ctx;
-
+      // const ctx = socket.opsiproxy_socket_ctx;
       /*
         // set socket uuid on connection
         socket.uuid = randomGuid();
@@ -1246,10 +1220,14 @@ class OpsiHTTPProxy extends EventEmitter {
         client_to_proxy_request: opsiproxy_http_incomming_message_i,
         proxy_to_client_response: opsiproxy_http_proxy_to_client_response_message_i
       ) => {
+        // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+        // %%% Working/Commented Out For Context Implementations %%%%%%%
+        // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
         // debugger;
         // gather context
+        /*
         const ctx = (client_to_proxy_request.socket as opsiproxy_socket_i)
-          .opsiproxy_net_ctx;
+          .opsiproxy_socket_ctx;
         if (!ctx) throw new Error('request_with_no_context_is_unreasonable');
 
         // proxy_to_client_response.end();
@@ -1341,7 +1319,8 @@ class OpsiHTTPProxy extends EventEmitter {
 
         // Pipe the client request body to the destination
         client_to_proxy_request.pipe(proxyReq);
-
+        */
+        // OLD FROM node-mitm-http-proxy original code
         /*
 
         function makeProxyToServerRequest() {
@@ -1367,7 +1346,6 @@ class OpsiHTTPProxy extends EventEmitter {
         }
 
         */
-
         /*
         if (this.options.forceChunkedRequest) {
           delete headers['content-length'];
@@ -1393,7 +1371,6 @@ class OpsiHTTPProxy extends EventEmitter {
           });
         });
         */
-
         /*
         const hostPort = {
           host: '',
@@ -1423,7 +1400,6 @@ class OpsiHTTPProxy extends EventEmitter {
           }
         }
           */
-
         // debugger;
       }
     );
@@ -1512,6 +1488,7 @@ class OpsiHTTPProxy extends EventEmitter {
 
 export {
   OpsiHTTPProxy,
+  opsiproxy_http_incomming_message_i,
   opsiproxy_plugin_info_t,
   opsiproxy_plugin_t,
   opsiproxy_plugin_event_cb_t,
