@@ -5,6 +5,7 @@
 /* eslint-disable @typescript-eslint/no-this-alias */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
+import { EventEmitter } from 'stream';
 import { randomGuid } from '@opsimathically/randomdatatools';
 import IterAsync from '@opsimathically/iterasync';
 import { Deferred, DeferredMap } from '@opsimathically/deferred';
@@ -20,6 +21,10 @@ import {
   opsiproxy_plugin_activation_t,
   opsiproxy_plugin_runner_routable_label_info_t
 } from '@src/proxies/http/plugin_runner/OpsiProxyPluginRunner.class';
+
+// import context processors
+import { OpsiProxyTunnelContextProcessor } from '@src/proxies/http/contexts/tunnelling_request_context_processor/OpsiProxyTunnelContextProcessor.class';
+import { OpsiProxyForwardRequestContextProcessor } from '@src/proxies/http/contexts/forward_request_context_processor/OpsiProxyForwardRequestContextProcessor.class';
 
 import { constants } from 'fs';
 import { access } from 'fs/promises';
@@ -273,7 +278,7 @@ type http_headers_t = Record<string, string>;
  *
  */
 
-class OpsiHTTPProxy {
+class OpsiHTTPProxy extends EventEmitter {
   /*
   // These are found within the options set, and appear to have 
   // been duplicated.
@@ -358,6 +363,7 @@ class OpsiHTTPProxy {
   wssServer: WebSocketServer | undefined;
 
   constructor(options: opsiproxy_options_t) {
+    super();
     this.options = options;
     /*
     this.onConnectHandlers = [];
