@@ -10,6 +10,9 @@
 // attacker controlled.  I'd like to use a hash of the host name instead,
 // as it's guaranteed to match the host, as well as removing he hostname
 // as an attack vector.
+//
+// We may also want to move certification generation to a worker thread,
+// since it can be a bit slow, and we don't want to block the main thread.
 
 import FS from 'fs';
 import path from 'path';
