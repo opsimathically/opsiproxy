@@ -1,6 +1,16 @@
 /* eslint-disable @typescript-eslint/no-unsafe-function-type */
 /* eslint-disable @typescript-eslint/no-this-alias */
 /* eslint-disable @typescript-eslint/no-explicit-any */
+
+// TODO: We're going to want to go through this code and modernize it,
+// and provide additional capabilities for certificate generation naming
+// convention.  Right now, certficate names reference host names, but
+// that is not a reasonable thing from a sanity/security perspective,
+// since there are potential edge cases where a host name could be
+// attacker controlled.  I'd like to use a hash of the host name instead,
+// as it's guaranteed to match the host, as well as removing he hostname
+// as an attack vector.
+
 import FS from 'fs';
 import path from 'path';
 import Forge from 'node-forge';
