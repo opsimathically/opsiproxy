@@ -185,7 +185,7 @@ export interface ICallbacks {
      Example
 
      proxy.onRequest(function(ctx, callback) {
-           console.log('REQUEST:', ctx.clientToProxyRequest.url);
+           console.log('REQUEST:', ctx.client_to_proxy_request.url);
            return callback();
          }); */
   onRequest(fcn: OnRequestParams): void;
@@ -249,7 +249,7 @@ export interface IBaseContext {
   closedByServer?: boolean;
   closedByClient?: boolean;
 
-  connectRequest: http.IncomingMessage;
+  connect_request: http.IncomingMessage;
   /** user defined tags, initially constructed in the proxy-internals.tx proxy.onRequest() callback, you can add what you like here. */
   tags?: {
     id: number;
@@ -266,10 +266,10 @@ export interface IBaseContext {
 
 export type IContext = ICallbacks &
   IBaseContext & {
-    clientToProxyRequest: http.IncomingMessage;
-    proxyToClientResponse: http.ServerResponse;
-    proxyToServerRequest: http.ClientRequest | undefined;
-    serverToProxyResponse: http.IncomingMessage | undefined;
+    client_to_proxy_request: http.IncomingMessage;
+    proxy_to_client_response: http.ServerResponse;
+    proxy_to_server_request: http.ClientRequest | undefined;
+    server_to_proxy_response: http.IncomingMessage | undefined;
 
     /**Adds a stream into the request body stream.
 
@@ -298,7 +298,7 @@ export type IContext = ICallbacks &
 
     /** undocumented, allows adjusting the request in callbacks (such as .onRequest()) before sending  upstream (to proxy or target host)..
      * FYI these values seem pre-populated with defaults based on the request, you can modify them to change behavior. */
-    proxyToServerRequestOptions:
+    proxy_to_server_request_options:
       | undefined
       | {
           /** ex: "GET" */
@@ -322,7 +322,7 @@ export type IContext = ICallbacks &
     onResponseEndHandlers: OnRequestParams[];
     onRequestHeadersHandlers: OnRequestParams[];
     onResponseHeadersHandlers: OnRequestParams[];
-    responseContentPotentiallyModified: boolean;
+    response_content_potentially_modified: boolean;
   };
 
 export interface ICertficateContext {

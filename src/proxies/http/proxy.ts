@@ -183,6 +183,19 @@ type opsiproxy_options_t = {
   plugins: opsiproxy_plugin_t[];
 };
 
+type mitm_server_certs_t = {
+  cert_pem: Buffer;
+  private_key_pem: Buffer;
+};
+
+type mitm_server_set_t = {
+  hostname: string;
+  listening_port: number;
+  mitm_certs: mitm_server_certs_t;
+  https_mitm_server: any;
+  webscoket_mitm_server: any;
+};
+
 type http_headers_t = Record<string, string>;
 /**
  * My History With This Project:
@@ -289,12 +302,22 @@ class OpsiHTTPProxy {
   ca!: ca;
 
   // connection requests
-  connectRequests: Record<string, http.IncomingMessage> = {};
+  connect_requests: Record<string, http.IncomingMessage> = {};
+
+  // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+  // %%% Tracking Maps %%%%%%%%%%%%%%%%
+  // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
   // a map of all request contexts
   context_map: Map<string, OpsiProxyNetContext> = new Map<
     string,
     OpsiProxyNetContext
+  >();
+
+  // map of all mitm servers
+  mitm_server_map: Map<string, mitm_server_set_t> = new Map<
+    string,
+    mitm_server_set_t
   >();
 
   // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -342,7 +365,7 @@ class OpsiHTTPProxy {
 
   // not sure what this is used for; wouldn't this be relevant only
   // in a context?
-  responseContentPotentiallyModified: boolean;
+  response_content_potentially_modified: boolean;
 
   sslSemaphores: Record<string, semaphore.Semaphore> = {};
   sslServers: Record<string, IProxySSLServer> = {};
@@ -368,7 +391,7 @@ class OpsiHTTPProxy {
     this.onResponseDataHandlers = [];
     this.onResponseEndHandlers = [];
     */
-    this.responseContentPotentiallyModified = false;
+    this.response_content_potentially_modified = false;
   }
 
   async start() {
@@ -376,7 +399,24 @@ class OpsiHTTPProxy {
     // create http proxy server
   }
 
-  // check if something is a writable directory
+  // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+  // %%% File/Directory Utilities %%%%%%%%%%%%%
+  // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+  // checks if a file exists and is readable
+  async fileExistsAndIsReadable(f: string): Promise<boolean> {
+    try {
+      const resolved_file = path.resolve(f);
+      const stats = await fs_promises.stat(resolved_file);
+      if (!stats.isFile()) return false;
+      await fs_promises.access(resolved_file, constants.R_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  // check if directory exists and is writable
   async isWritableDirectory(p: string): Promise<boolean> {
     try {
       const resolvedPath = path.resolve(p);
@@ -463,7 +503,7 @@ class OpsiHTTPProxy {
 
     opsiproxy_ref.sslServers = {};
     opsiproxy_ref.sslSemaphores = {};
-    opsiproxy_ref.connectRequests = {};
+    opsiproxy_ref.connect_requests = {};
 
     // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
     // %%% Net/HTTP Proxy Servers %%%%%%%%%%%%%%%%%%%
@@ -474,7 +514,7 @@ class OpsiHTTPProxy {
 
     // create server
     opsiproxy_ref.netServer = net.createServer({
-      pauseOnConnect: true,
+      /*pauseOnConnect: true,*/
       blockList: opsiproxy_ref.options.proxy_incomming_block_list
     });
 
@@ -510,6 +550,347 @@ class OpsiHTTPProxy {
       }
     );
     return await deferral.promise;
+  }
+
+  // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+  // %%% TLS/SSL Detection %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+  // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+  /*
+   * Detect TLS from first bytes of data
+   * Inspired from https://gist.github.com/tg-x/835636
+   * used heuristic:
+   * - an incoming connection using SSLv3/TLSv1 records should start with 0x16
+   * - an incoming connection using SSLv2 records should start with the record size
+   *   and as the first record should not be very big we can expect 0x80 or 0x00 (the MSB is a flag)
+   * - everything else is considered to be unencrypted
+   */
+  detectTLSFromRequestHead(head: Buffer) {
+    if (head[0] == 0x16 || head[0] == 0x80 || head[0] == 0x00) {
+      return true;
+    }
+    return false;
+  }
+
+  // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+  // %%% HTTPs MITM Server Methods %%%%%%%%%%%%%%%%%%%%%%%%%%%
+  // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+  async getHTTPsMITMCertificates(
+    ctx: OpsiProxyNetContext
+  ): Promise<mitm_server_certs_t> {
+    // set self reference
+    const opsiproxy_ref = this;
+
+    // ensure we have a host
+    if (!ctx?.client_to_proxy_request?.host_and_port?.host)
+      return null as unknown as mitm_server_certs_t;
+
+    const hostname = ctx.client_to_proxy_request.host_and_port.host;
+
+    const keypath = path.join(
+      opsiproxy_ref.options.sslCaDir,
+      'keys',
+      hostname,
+      '.key'
+    );
+    const certpath = path.join(
+      opsiproxy_ref.options.sslCaDir,
+      'certs',
+      hostname,
+      '.pem'
+    );
+
+    // pems
+    let cert_pem: Buffer = Buffer.from('');
+    let private_key_pem: Buffer = Buffer.from('');
+
+    // ensure both key and cert are readable
+    const key_is_readable =
+      await opsiproxy_ref.fileExistsAndIsReadable(keypath);
+    const cert_is_readable =
+      await opsiproxy_ref.fileExistsAndIsReadable(certpath);
+
+    // gather pems if they exist
+    if (key_is_readable && cert_is_readable) {
+      cert_pem = await fs_promises.readFile(certpath);
+      private_key_pem = await fs_promises.readFile(keypath);
+    }
+
+    // if the key isn't readable, or cert isn't readable, we need to create the certs
+    else if (!key_is_readable || !cert_is_readable) {
+      const hosts = [hostname];
+      const cert_deferred: Deferred = new Deferred();
+      opsiproxy_ref.ca.generateServerCertificateKeys(
+        hosts,
+        (certPEM: any, privateKeyPEM: any) => {
+          cert_pem = certPEM;
+          private_key_pem = privateKeyPEM;
+          cert_deferred.resolve(true);
+        }
+      );
+      await cert_deferred.promise;
+    }
+
+    if (!cert_pem || !private_key_pem)
+      throw new Error('failed_to_create_or_load_certificates');
+
+    // return pems
+    return {
+      cert_pem: cert_pem,
+      private_key_pem: private_key_pem
+    };
+  }
+
+  // This method will create a MITM server using our own certificate authority
+  // suitable for proxying connections.
+  async createHTTPsMITMServer(
+    ctx: OpsiProxyNetContext
+  ): Promise<mitm_server_set_t> {
+    // set self reference
+    const opsiproxy_ref = this;
+
+    if (!ctx.client_to_proxy_request.host_and_port) {
+      return null as unknown as mitm_server_set_t;
+    }
+
+    // gather hostname
+    const hostname = ctx.client_to_proxy_request.host_and_port.host;
+
+    // if we already have a proxy ready, go ahead and return it immediately
+    const existing_proxy_set = opsiproxy_ref.mitm_server_map.get(hostname);
+    if (existing_proxy_set) return existing_proxy_set;
+
+    // create or get private key and cert for this host
+    const mitm_certs = await opsiproxy_ref.getHTTPsMITMCertificates(ctx);
+
+    // check certificates
+    if (!mitm_certs.cert_pem.length || !mitm_certs.private_key_pem)
+      throw new Error('could_not_create_mitm_certificates');
+
+    const https_server_options: https.ServerOptions = {
+      key: mitm_certs.private_key_pem,
+      cert: mitm_certs.cert_pem
+    };
+
+    const https_mitm_server = https.createServer(https_server_options);
+
+    https_mitm_server.on('error', async (err: Error) => {
+      debugger;
+    });
+
+    https_mitm_server.on(
+      'clientError',
+      async (err: Error, socket: opsiproxy_socket_i) => {
+        debugger;
+      }
+    );
+
+    https_mitm_server.on(
+      'connect',
+      (req: IncomingMessage, socket: stream.Duplex, head: Buffer) => {
+        debugger;
+      }
+    );
+
+    https_mitm_server.on(
+      'request',
+      (
+        // req: IncomingMessage,
+        // res: ServerResponse<IncomingMessage> & { req: IncomingMessage }
+        client_to_proxy_request: opsiproxy_http_incomming_message_i,
+        proxy_to_client_response: opsiproxy_http_proxy_to_client_response_message_i
+      ) => {
+        const ctx = (client_to_proxy_request.socket as opsiproxy_socket_i)
+          .opsiproxy_net_ctx;
+        if (!ctx) throw new Error('request_with_no_context_is_unreasonable');
+
+        if (!client_to_proxy_request?.host_and_port?.host) return;
+        if (!client_to_proxy_request?.host_and_port?.port) return;
+        /*
+        ctx_ref.proxy_to_client_response.writeHead(http_status_code, {
+          'Content-Type': 'text/html; charset=utf-8'
+        });
+        ctx_ref.proxy_to_client_response.end(reason, 'utf-8');
+        
+        debugger;
+        */
+
+        /*
+        proxy_to_client_response.writeHead(200, {
+          'Content-Type': 'text/html; charset=utf-8'
+        });
+        proxy_to_client_response.end('MOOO', 'utf-8');
+        */
+
+        // Choose http or https based on protocol
+        const transport =
+          ctx.client_to_proxy_request.parsed_request_url.protocol === 'https:'
+            ? https
+            : http;
+
+        // debugger;
+        const proxyReq = transport.request(
+          {
+            hostname: client_to_proxy_request.host_and_port.host,
+            port: client_to_proxy_request.host_and_port.port,
+            path:
+              ctx.client_to_proxy_request.parsed_request_url.pathname +
+              ctx.client_to_proxy_request.parsed_request_url.search,
+            method: ctx.client_to_proxy_request.method,
+            headers: ctx.client_to_proxy_request.headers
+          },
+          (proxyRes) => {
+            // Write the headers and status from the destination to the client
+            proxy_to_client_response.writeHead(
+              proxyRes.statusCode || 500,
+              proxyRes.headers
+            );
+            // Pipe the response from target back to the client
+            proxyRes.pipe(proxy_to_client_response);
+          }
+        );
+
+        proxyReq.on('error', (err) => {
+          console.error('Proxy request error:', err);
+          proxy_to_client_response.writeHead(502);
+          proxy_to_client_response.end('Bad Gateway');
+        });
+
+        // Pipe the client request body to the destination
+        client_to_proxy_request.pipe(proxyReq);
+        return;
+      }
+    );
+
+    const wss_mitm_server = new WebSocketServer({ server: https_mitm_server });
+    wss_mitm_server.on(
+      'connection',
+      (websocket: WebSocket, request: IncomingMessage) => {
+        debugger;
+        /*
+      websocket.upgradeReq = req;
+      self._onWebSocketServerConnect.call(self, true, ws, req);
+      */
+      }
+    );
+
+    // start listening with the https server using localhost and the
+    // first available port (port 0 selects any available)
+    const listen_deferred: Deferred = new Deferred();
+    let listening_port: number = 0;
+    https_mitm_server.listen({ port: 0, host: '127.0.0.1' }, () => {
+      listening_port = (https_mitm_server.address() as AddressInfo).port;
+      listen_deferred.resolve(true);
+    });
+    await listen_deferred.promise;
+
+    // define server set
+    const mitm_server_set: mitm_server_set_t = {
+      hostname: hostname,
+      listening_port: listening_port,
+      mitm_certs: mitm_certs,
+      https_mitm_server: https_mitm_server,
+      webscoket_mitm_server: wss_mitm_server
+    };
+
+    // add the proxy to the server map
+    opsiproxy_ref.mitm_server_map.set(hostname, mitm_server_set);
+
+    // return the created servers
+    return mitm_server_set;
+  }
+
+  async handleHTTPsMITMDataStart(params: {
+    ctx: OpsiProxyNetContext;
+    client_socket: opsiproxy_socket_i;
+    client_to_proxy_request: opsiproxy_http_incomming_message_i;
+    head: Buffer;
+    head_from_socket_data: Buffer;
+  }) {
+    const opsiproxy_ref = this;
+
+    const head_data: Buffer = params.head.length
+      ? params.head
+      : params.head_from_socket_data;
+
+    // always pause the socket on init
+    params.client_socket.pause();
+
+    // debugger;
+
+    // check if this request is encrypted/ssl/tls/etc
+    const is_encrypted = opsiproxy_ref.detectTLSFromRequestHead(head_data);
+    if (is_encrypted) {
+      params.ctx.stage.push(
+        'http_server__client_to_proxy__encrypted_request_detected'
+      );
+      params.ctx.setHttpEventFlag('request_is_encrypted', true);
+    }
+
+    // set the request handle in the context
+    params.ctx.client_to_proxy_request = params.client_to_proxy_request;
+
+    if (!params.client_to_proxy_request.host_and_port) {
+      await opsiproxy_ref.destroyContext(params.ctx);
+      params.client_socket.destroy();
+      return;
+    }
+
+    // IMPORTANT NOTE: For connect requests, the url will only be host:port, nothing else.
+
+    /*
+    // request URL must always be parsable
+    if (!(await params.ctx.parseRequestURL(params.client_to_proxy_request))) {
+      debugger;
+      await opsiproxy_ref.destroyContext(params.ctx);
+      params.client_socket.destroy();
+      return;
+    }
+    */
+
+    // create mitm server
+    const mitm_server_set: mitm_server_set_t =
+      await opsiproxy_ref.createHTTPsMITMServer(params.ctx);
+
+    const net_connect_deferred: Deferred = new Deferred();
+    const client_to_mitm_proxy_connection = net.connect(
+      {
+        port: mitm_server_set.listening_port,
+        host: '127.0.0.1',
+        allowHalfOpen: true
+      },
+      () => {
+        // handle close events on both sockets
+        client_to_mitm_proxy_connection.on('close', () => {
+          params.client_socket.destroy();
+        });
+        params.client_socket.on('close', () => {
+          client_to_mitm_proxy_connection.destroy();
+        });
+
+        // handle error events on both sockets
+        client_to_mitm_proxy_connection.on('error', () => {
+          params.client_socket.destroy();
+        });
+        params.client_socket.on('error', () => {
+          client_to_mitm_proxy_connection.destroy();
+        });
+
+        // pipe the client socket through the mitm socket
+        // and vice versa.  I think we can use an async generator here
+        // to control packet traversals.
+        params.client_socket.pipe(client_to_mitm_proxy_connection);
+        client_to_mitm_proxy_connection.pipe(params.client_socket);
+
+        // emit data to the client socket
+        params.client_socket.emit('data', head_data);
+        params.client_socket.resume();
+        net_connect_deferred.resolve(true);
+      }
+    );
+
+    await net_connect_deferred.promise;
   }
 
   // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -566,14 +947,25 @@ class OpsiHTTPProxy {
           return;
         }
 
+        /*
+        socket.on('data', (data: Buffer) => {
+          debugger;
+        });
+        */
+
         if (plugin_run_info.net_server_behavior === 'stop_at_this_stage') {
         }
 
         // handle specific plugin behavior indicators
         // debugger;
 
+        /*
         // if the socket is paused, unpause it to move to the next stage
-        if (!socket.readableFlowing) socket.resume();
+        if (!socket.readableFlowing) {
+          debugger;
+          socket.resume();
+        }
+        */
 
         // emit connection event to the http server
         opsiproxy_ref.httpServer.emit('connection', socket);
@@ -612,20 +1004,177 @@ class OpsiHTTPProxy {
     opsiproxy_ref.httpServer.on(
       'connect',
       async (
-        req: IncomingMessage,
-        client_socket: stream.Duplex,
+        client_to_proxy_request: opsiproxy_http_incomming_message_i,
+        client_socket: opsiproxy_socket_i,
         head: Buffer
       ) => {
-        const ctx = (req.socket as opsiproxy_socket_i).opsiproxy_net_ctx;
+        const ctx = (client_to_proxy_request.socket as opsiproxy_socket_i)
+          .opsiproxy_net_ctx;
+
+        // we should always have a context at this point
+        if (!ctx) throw new Error('context_is_not_available_when_it_should_be');
+
+        // parse the request host and port
+        ctx.parseRequestHostAndPort(client_to_proxy_request);
+
+        // often times, head is unset and we have to wait for data.  This is required
+        // for us to be able to detect tls/ssl connections.
+        if (!head || head.length === 0) {
+          // we have to wait for data
+          client_socket.once('data', async (data: Buffer) => {
+            await opsiproxy_ref.handleHTTPsMITMDataStart({
+              ctx: ctx,
+              client_to_proxy_request: client_to_proxy_request,
+              client_socket: client_socket,
+              head: head,
+              head_from_socket_data: data
+            });
+          });
+
+          client_socket.write('HTTP/1.1 200 OK\r\n');
+          /*
+          if (
+            self.keepAlive &&
+            req.headers['proxy-connection'] === 'keep-alive'
+          ) {
+            socket.write('Proxy-Connection: keep-alive\r\n');
+            socket.write('Connection: keep-alive\r\n');
+          }
+          */
+          client_socket.write('\r\n');
+          return;
+        }
+
+        await opsiproxy_ref.handleHTTPsMITMDataStart({
+          ctx: ctx,
+          client_socket: client_socket,
+          client_to_proxy_request: client_to_proxy_request,
+          head: head,
+          head_from_socket_data: Buffer.from('')
+        });
+
+        // client_socket
+        debugger;
+        return;
+        /*
+        // gather existing context from map
+        ctx.stage.push('http_server__client_to_proxy__request_recieved');
+        ctx.setHttpEventFlag('request_context_is_valid', true);
+
+        
+        ctx.proxy_to_client_response = proxy_to_client_response;
+
+        // request URL must always be parsable
+        if (!(await ctx.parseRequestURL(client_to_proxy_request))) {
+          ctx.client_to_proxy_requestTerminate('unparsable request url', 502);
+          proxy_to_client_response.end();
+          return;
+        }
+
+        let host: string = '';
+        let port: number = -1;
+        if (await ctx.parseRequestHostHeader(client_to_proxy_request)) {
+          host = ctx.client_to_proxy_request.parsed_host_header.host;
+          port = ctx.client_to_proxy_request.parsed_host_header.port;
+        } else {
+          host = ctx.client_to_proxy_request.parsed_request_url.hostname;
+          port = parseInt(ctx.client_to_proxy_request.parsed_request_url.port);
+        }
+
+        // ensure the protocol is supported
+        if (
+          !['http:', 'https:', 'ws:', 'wss:'].includes(
+            ctx.client_to_proxy_request.parsed_request_url.protocol
+          )
+        ) {
+          ctx.client_to_proxy_requestTerminate('unsupported protocol', 502);
+          proxy_to_client_response.end();
+          return;
+        }
+
+        // pause the request
+        ctx.client_to_proxy_request.pause();
+
         // debugger;
 
-        const [host, port] = req.url!.split(':');
-        const serverSocket = net.connect(Number(port), host, () => {
+        const headers: http_headers_t = {};
+
+        // don't forward proxy-headers
+        for (const h in ctx.client_to_proxy_request.headers) {
+          if (!/^proxy-/i.test(h)) {
+            const header = ctx.client_to_proxy_request.headers[h];
+            if (typeof header === 'string')
+              if (typeof h === 'string') headers[h] = header;
+          }
+        }
+        */
+
+        /*
+         * Detect TLS from first bytes of data
+         * Inspired from https://gist.github.com/tg-x/835636
+         * used heuristic:
+         * - an incoming connection using SSLv3/TLSv1 records should start with 0x16
+         * - an incoming connection using SSLv2 records should start with the record size
+         *   and as the first record should not be very big we can expect 0x80 or 0x00 (the MSB is a flag)
+         * - everything else is considered to be unencrypted
+         */
+        /*
+        if (head[0] == 0x16 || head[0] == 0x80 || head[0] == 0x00) {
+          // URL is in the form 'hostname:port'
+          const hostname = req.url!.split(':', 2)[0];
+          const sslServer = this.sslServers[hostname];
+          if (sslServer) {
+            return makeConnection(sslServer.port);
+          }
+          const wildcardHost = hostname.replace(/[^.]+\./, '*.');
+          let sem = self.sslSemaphores[wildcardHost];
+          if (!sem) {
+            sem = self.sslSemaphores[wildcardHost] = semaphore(1);
+          }
+          sem.take(() => {
+            if (self.sslServers[hostname]) {
+              process.nextTick(sem.leave.bind(sem));
+              return makeConnection(self.sslServers[hostname].port);
+            }
+            if (self.sslServers[wildcardHost]) {
+              process.nextTick(sem.leave.bind(sem));
+              self.sslServers[hostname] = {
+                // @ts-ignore
+                port: self.sslServers[wildcardHost].port
+              };
+              return makeConnection(self.sslServers[hostname].port);
+            }
+            getHttpsServer(hostname, (err, port) => {
+              process.nextTick(sem.leave.bind(sem));
+              if (err) {
+                console.error('Error getting HTTPs server');
+                console.error(err);
+                return self._onError('OPEN_HTTPS_SERVER_ERROR', null, err);
+              }
+              return makeConnection(port);
+            });
+            delete self.sslSemaphores[wildcardHost];
+          });
+        } else {
+          return makeConnection(this.httpPort);
+        }
+        */
+
+        // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+        // %%% Create Tunnel %%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+        // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+        const [host, port] = client_to_proxy_request.url!.split(':');
+        const serverSocket = net.connect(Number(port), host, async () => {
           client_socket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+
+          // this is where we create a https server
+
           // Pipe the initial buffered data, if any
           if (head && head.length > 0) {
             serverSocket.write(head);
           }
+
           // Tunnel data between client and target server
           client_socket.pipe(serverSocket);
           serverSocket.pipe(client_socket);
@@ -704,63 +1253,63 @@ class OpsiHTTPProxy {
     opsiproxy_ref.httpServer.on(
       'request',
       async (
-        clientToProxyRequest: opsiproxy_http_incomming_message_i,
-        proxyToClientResponse: opsiproxy_http_proxy_to_client_response_message_i
+        client_to_proxy_request: opsiproxy_http_incomming_message_i,
+        proxy_to_client_response: opsiproxy_http_proxy_to_client_response_message_i
       ) => {
         // debugger;
         // gather context
-        const ctx = (clientToProxyRequest.socket as opsiproxy_socket_i)
+        const ctx = (client_to_proxy_request.socket as opsiproxy_socket_i)
           .opsiproxy_net_ctx;
         if (!ctx) throw new Error('request_with_no_context_is_unreasonable');
 
-        // proxyToClientResponse.end();
+        // proxy_to_client_response.end();
 
         // gather existing context from map
         ctx.stage.push('http_server__client_to_proxy__request_recieved');
         ctx.setHttpEventFlag('request_context_is_valid', true);
 
-        ctx.clientToProxyRequest = clientToProxyRequest;
-        ctx.proxyToClientResponse = proxyToClientResponse;
+        ctx.client_to_proxy_request = client_to_proxy_request;
+        ctx.proxy_to_client_response = proxy_to_client_response;
 
         // request URL must always be parsable
-        if (!(await ctx.parseRequestURL(clientToProxyRequest))) {
-          ctx.clientToProxyRequestTerminate('unparsable request url', 502);
-          proxyToClientResponse.end();
+        if (!(await ctx.parseRequestURL(client_to_proxy_request))) {
+          ctx.client_to_proxy_requestTerminate('unparsable request url', 502);
+          proxy_to_client_response.end();
           return;
         }
 
         let host: string = '';
         let port: number = -1;
-        if (await ctx.parseRequestHostHeader(clientToProxyRequest)) {
-          host = ctx.clientToProxyRequest.parsed_host_header.host;
-          port = ctx.clientToProxyRequest.parsed_host_header.port;
+        if (await ctx.parseRequestHostHeader(client_to_proxy_request)) {
+          host = ctx.client_to_proxy_request.parsed_host_header.host;
+          port = ctx.client_to_proxy_request.parsed_host_header.port;
         } else {
-          host = ctx.clientToProxyRequest.parsed_request_url.hostname;
-          port = parseInt(ctx.clientToProxyRequest.parsed_request_url.port);
+          host = ctx.client_to_proxy_request.parsed_request_url.hostname;
+          port = parseInt(ctx.client_to_proxy_request.parsed_request_url.port);
         }
 
         // ensure the protocol is supported
         if (
           !['http:', 'https:', 'ws:', 'wss:'].includes(
-            ctx.clientToProxyRequest.parsed_request_url.protocol
+            ctx.client_to_proxy_request.parsed_request_url.protocol
           )
         ) {
-          ctx.clientToProxyRequestTerminate('unsupported protocol', 502);
-          proxyToClientResponse.end();
+          ctx.client_to_proxy_requestTerminate('unsupported protocol', 502);
+          proxy_to_client_response.end();
           return;
         }
 
         // pause the request
-        ctx.clientToProxyRequest.pause();
+        ctx.client_to_proxy_request.pause();
 
         // debugger;
 
         const headers: http_headers_t = {};
 
         // don't forward proxy-headers
-        for (const h in ctx.clientToProxyRequest.headers) {
+        for (const h in ctx.client_to_proxy_request.headers) {
           if (!/^proxy-/i.test(h)) {
-            const header = ctx.clientToProxyRequest.headers[h];
+            const header = ctx.client_to_proxy_request.headers[h];
             if (typeof header === 'string')
               if (typeof h === 'string') headers[h] = header;
           }
@@ -768,7 +1317,7 @@ class OpsiHTTPProxy {
 
         // Choose http or https based on protocol
         const transport =
-          ctx.clientToProxyRequest.parsed_request_url.protocol === 'https:'
+          ctx.client_to_proxy_request.parsed_request_url.protocol === 'https:'
             ? https
             : http;
 
@@ -778,45 +1327,45 @@ class OpsiHTTPProxy {
             hostname: host,
             port: port,
             path:
-              ctx.clientToProxyRequest.parsed_request_url.pathname +
-              ctx.clientToProxyRequest.parsed_request_url.search,
-            method: ctx.clientToProxyRequest.method,
-            headers: ctx.clientToProxyRequest.headers
+              ctx.client_to_proxy_request.parsed_request_url.pathname +
+              ctx.client_to_proxy_request.parsed_request_url.search,
+            method: ctx.client_to_proxy_request.method,
+            headers: ctx.client_to_proxy_request.headers
           },
           (proxyRes) => {
             // Write the headers and status from the destination to the client
-            proxyToClientResponse.writeHead(
+            proxy_to_client_response.writeHead(
               proxyRes.statusCode || 500,
               proxyRes.headers
             );
             // Pipe the response from target back to the client
-            proxyRes.pipe(proxyToClientResponse);
+            proxyRes.pipe(proxy_to_client_response);
           }
         );
 
         proxyReq.on('error', (err) => {
           console.error('Proxy request error:', err);
-          proxyToClientResponse.writeHead(502);
-          proxyToClientResponse.end('Bad Gateway');
+          proxy_to_client_response.writeHead(502);
+          proxy_to_client_response.end('Bad Gateway');
         });
 
         // Pipe the client request body to the destination
-        clientToProxyRequest.pipe(proxyReq);
+        client_to_proxy_request.pipe(proxyReq);
 
         /*
 
         function makeProxyToServerRequest() {
           const proto = ctx.isSSL ? https : http;
-          ctx.proxyToServerRequest = proto.request(
-            ctx.proxyToServerRequestOptions!,
-            proxyToServerRequestComplete
+          ctx.proxy_to_server_request = proto.request(
+            ctx.proxy_to_server_request_options!,
+            proxy_to_server_requestComplete
           );
-          ctx.proxyToServerRequest.on(
+          ctx.proxy_to_server_request.on(
             'error',
             self._onError.bind(self, 'PROXY_TO_SERVER_REQUEST_ERROR', ctx)
           );
           ctx.requestFilters.push(new ProxyFinalRequestFilter(self, ctx));
-          let prevRequestPipeElem = ctx.clientToProxyRequest;
+          let prevRequestPipeElem = ctx.client_to_proxy_request;
           ctx.requestFilters.forEach((filter) => {
             filter.on(
               'error',
@@ -824,7 +1373,7 @@ class OpsiHTTPProxy {
             );
             prevRequestPipeElem = prevRequestPipeElem.pipe(filter);
           });
-          ctx.clientToProxyRequest.resume();
+          ctx.client_to_proxy_request.resume();
         }
 
         */
@@ -834,9 +1383,9 @@ class OpsiHTTPProxy {
           delete headers['content-length'];
         }
 
-        ctx.proxyToServerRequestOptions = {
-          method: ctx.clientToProxyRequest.method!,
-          path: ctx.clientToProxyRequest.url!,
+        ctx.proxy_to_server_request_options = {
+          method: ctx.client_to_proxy_request.method!,
+          path: ctx.client_to_proxy_request.url!,
           host: hostPort.host,
           port: hostPort.port,
           headers,
@@ -867,9 +1416,9 @@ class OpsiHTTPProxy {
           delete headers['content-length'];
         }
 
-        ctx.proxyToServerRequestOptions = {
-          method: ctx.clientToProxyRequest.method!,
-          path: ctx.clientToProxyRequest.url!,
+        ctx.proxy_to_server_request_options = {
+          method: ctx.client_to_proxy_request.method!,
+          path: ctx.client_to_proxy_request.url!,
           host: hostPort.host,
           port: hostPort.port,
           headers: headers,
@@ -969,1354 +1518,6 @@ class OpsiHTTPProxy {
     }
     return true;
   }
-
-  /*
-  _createHttpsServer(
-    options: ServerOptions & { hosts?: string[] },
-    callback: ICreateServerCallback
-  ) {
-    const httpsServer = https.createServer({
-      ...options
-    } as ServerOptions);
-
-    httpsServer.timeout = this.timeout;
-
-    httpsServer.on(
-      'error',
-      this._onError.bind(this, 'HTTPS_SERVER_ERROR', null)
-    );
-
-    httpsServer.on(
-      'clientError',
-      this._onError.bind(this, 'HTTPS_CLIENT_ERROR', null)
-    );
-
-    httpsServer.on('connect', this._onHttpServerConnect.bind(this));
-    httpsServer.on('request', this._onHttpServerRequest.bind(this, true));
-    const self = this;
-    const wssServer = new WebSocketServer({ server: httpsServer });
-    wssServer.on('connection', (ws: opsiproxy_websocket_i, req) => {
-      ws.upgradeReq = req;
-      self._onWebSocketServerConnect.call(self, true, ws, req);
-    });
-
-    // Using listenOptions to bind the server to a particular IP if requested via options.host
-    // port 0 to get the first available port
-    const listenOptions = {
-      port: 0,
-      host: '0.0.0.0'
-    };
-    if (this.httpsPort && !options.hosts) {
-      listenOptions.port = this.httpsPort;
-    }
-    if (this.httpHost) {
-      listenOptions.host = this.httpHost;
-    }
-
-    httpsServer.listen(listenOptions, () => {
-      if (callback) {
-        callback(
-          (httpsServer.address() as AddressInfo).port,
-          httpsServer,
-          wssServer
-        );
-      }
-    });
-  }
-  */
-
-  // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-  // %%% Handler Definitions %%%%%%%%%%%%%%%%%%%%%%
-  // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-
-  /*
-  onError(fn: OnErrorParams) {
-    this.onErrorHandlers.push(fn);
-    return this;
-  }
-
-  onConnect(fn: OnConnectParams) {
-    this.onConnectHandlers.push(fn);
-    return this;
-  }
-
-  onRequestHeaders(fn: OnRequestParams) {
-    this.onRequestHeadersHandlers.push(fn);
-    return this;
-  }
-
-  onRequest(fn: OnRequestParams) {
-    this.onRequestHandlers.push(fn);
-    return this;
-  }
-
-  onWebSocketConnection(fn: OnWebsocketRequestParams) {
-    this.onWebSocketConnectionHandlers.push(fn);
-    return this;
-  }
-
-  onWebSocketSend(fn: OnWebSocketSendParams) {
-    this.onWebSocketFrameHandlers.push(
-      function (
-        ctx: any,
-        type: string,
-        fromServer: any,
-        data: any,
-        flags: any,
-        callback: (arg0: null, arg1: any, arg2: any) => void
-      ) {
-        if (!fromServer && type === 'message') {
-          return this(ctx, data, flags, callback);
-        } else {
-          callback(null, data, flags);
-        }
-      }.bind(fn)
-    );
-    return this;
-  }
-
-  onWebSocketMessage(fn: OnWebSocketMessageParams) {
-    this.onWebSocketFrameHandlers.push(
-      function (
-        ctx: any,
-        type: string,
-        fromServer: any,
-        data: any,
-        flags: any,
-        callback: (arg0: null, arg1: any, arg2: any) => void
-      ) {
-        if (fromServer && type === 'message') {
-          return this(ctx, data, flags, callback);
-        } else {
-          callback(null, data, flags);
-        }
-      }.bind(fn)
-    );
-    return this;
-  }
-
-  onWebSocketFrame(fn: OnWebSocketFrameParams) {
-    this.onWebSocketFrameHandlers.push(fn);
-    return this;
-  }
-
-  onWebSocketClose(fn: OnWebSocketCloseParams) {
-    this.onWebSocketCloseHandlers.push(fn);
-    return this;
-  }
-
-  onWebSocketError(fn: OnWebSocketErrorParams) {
-    this.onWebSocketErrorHandlers.push(fn);
-    return this;
-  }
-
-  onRequestData(fn: OnRequestDataParams) {
-    this.onRequestDataHandlers.push(fn);
-    return this;
-  }
-
-  onRequestEnd(fn: OnRequestParams) {
-    this.onRequestEndHandlers.push(fn);
-    return this;
-  }
-
-  onResponse(fn: OnRequestParams) {
-    this.onResponseHandlers.push(fn);
-    return this;
-  }
-
-  onResponseHeaders(fn: OnRequestParams) {
-    this.onResponseHeadersHandlers.push(fn);
-    return this;
-  }
-
-  onResponseData(fn: OnRequestDataParams) {
-    this.onResponseDataHandlers.push(fn);
-    this.responseContentPotentiallyModified = true;
-    return this;
-  }
-
-  onResponseEnd(fn: OnRequestParams) {
-    this.onResponseEndHandlers.push(fn);
-    return this;
-  }
-  */
-
-  /*
-  // Since node 0.9.9, ECONNRESET on sockets are no longer hidden
-  _onSocketError(socketDescription: string, err: NodeJS.ErrnoException) {
-    if (err.errno === -54 || err.code === 'ECONNRESET') {
-      console.debug(`Got ECONNRESET on ${socketDescription}, ignoring.`);
-    } else {
-      this._onError(`${socketDescription}_ERROR`, null, err);
-    }
-  }
-  */
-
-  async _onHttpServerConnect(
-    req: http.IncomingMessage,
-    socket: stream.Duplex,
-    head: Buffer
-  ) {
-    /*
-    const self = this;
-
-    socket.on(
-      'error',
-      self._onSocketError.bind(self, 'CLIENT_TO_PROXY_SOCKET')
-    );
-
-    const ia = new IterAsync<opsiproxy_plugin_t, any>({
-      concurrency: 10,
-      extra: {},
-      gen: async function* () {
-        for (let idx = 0; idx < self.plugins.length; idx++) {
-          yield self.plugins[idx];
-        }
-      },
-      processor: async function (
-        this: IterAsync<opsiproxy_plugin_t, any>,
-        item: opsiproxy_plugin_t
-      ) {}
-    });
-
-    await ia.run();
-    
-
-    if (!head || head.length === 0) {
-      socket.once(
-        'data',
-        self._onHttpServerConnectData.bind(self, req, socket)
-      );
-      socket.write('HTTP/1.1 200 OK\r\n');
-      if (self.keepAlive && req.headers['proxy-connection'] === 'keep-alive') {
-        socket.write('Proxy-Connection: keep-alive\r\n');
-        socket.write('Connection: keep-alive\r\n');
-      }
-      return socket.write('\r\n');
-    } else {
-      self._onHttpServerConnectData(req, socket, head);
-    }
-    */
-    /*
-    // you can forward HTTPS request directly by adding custom CONNECT method handler
-    return async.forEach(
-      self.onConnectHandlers,
-      (fn, callback) => {
-        fn.call(self, req, socket, head, callback);
-      },
-      (err) => {
-        if (err) {
-          return self._onError('ON_CONNECT_ERROR', null, err);
-        }
-        // we need first byte of data to detect if request is SSL encrypted
-
-        if (!head || head.length === 0) {
-          socket.once(
-            'data',
-            self._onHttpServerConnectData.bind(self, req, socket)
-          );
-          socket.write('HTTP/1.1 200 OK\r\n');
-          if (
-            self.keepAlive &&
-            req.headers['proxy-connection'] === 'keep-alive'
-          ) {
-            socket.write('Proxy-Connection: keep-alive\r\n');
-            socket.write('Connection: keep-alive\r\n');
-          }
-          return socket.write('\r\n');
-        } else {
-          self._onHttpServerConnectData(req, socket, head);
-        }
-      }
-    );
-    */
-  }
-
-  /*
-  async makeConnection(
-    req: http.IncomingMessage,
-    socket: stream.Duplex,
-    head: Buffer,
-    port: number
-  ) {
-    const self = this;
-
-    // open a TCP connection to the remote host
-    const conn = net.connect(
-      {
-        port,
-        host: '0.0.0.0',
-        allowHalfOpen: true
-      },
-
-      () => {
-        // create a tunnel between the two hosts
-        const connectKey = `${conn.localPort}:${conn.remotePort}`;
-        self.connectRequests[connectKey] = req;
-        const cleanupFunction = () => {
-          delete self.connectRequests[connectKey];
-        };
-        conn.on('close', () => {
-          cleanupFunction();
-          socket.destroy();
-        });
-        socket.on('close', () => {
-          conn.destroy();
-        });
-        conn.on('error', (err) => {
-          console.error('Connection error:');
-          console.error(err);
-          conn.destroy();
-        });
-        socket.on('error', (err) => {
-          console.error('Socket error:');
-          console.error(err);
-        });
-        socket.pipe(conn);
-        conn.pipe(socket);
-        socket.emit('data', head);
-        return socket.resume();
-      }
-    );
-    conn.on('error', self._onSocketError.bind(self, 'PROXY_TO_PROXY_SOCKET'));
-  }
-  */
-
-  /*
-  async getHttpsServer(hostname: string, callback: ErrorCallback) {
-    const self = this;
-
-    const files = {
-      keyFile: `${self.sslCaDir}/keys/${hostname}.key`,
-      certFile: `${self.sslCaDir}/certs/${hostname}.pem`,
-      hosts: [hostname]
-    };
-
-    let keyfile_exists = false;
-    try {
-      await access(files.keyFile, constants.F_OK);
-      keyfile_exists = true;
-    } catch (err) {}
-
-    let certfile_exists = false;
-    try {
-      await access(files.certFile, constants.F_OK);
-      certfile_exists = true;
-    } catch (err) {}
-
-    if (keyfile_exists && certfile_exists) {
-      let keyfile_content = fs_promises.readFile(files.keyFile);
-      let certfile_content = fs_promises.readFile(files.certFile);
-      const cert_data = {
-        key: keyfile_content,
-        cert: certfile_content,
-        hosts: files.hosts
-      };
-    } else {
-      const ctx: ICertficateContext = {
-        hostname: hostname,
-        files: files,
-        data: {
-          keyFileExists: keyfile_exists,
-          certFileExists: certfile_exists
-        }
-      };
-
-      const hosts = files.hosts || [ctx.hostname];
-
-      const generated_certs = await new Promise(function (resolve, reject) {
-        self.ca.generateServerCertificateKeys(
-          hosts,
-          (certPEM: any, privateKeyPEM: any) => {
-            resolve({
-              key: certPEM,
-              cert: privateKeyPEM,
-              hosts: hosts
-            });
-          }
-        );
-      });
-    }
-
-    let hosts;
-    if (
-      results.httpsOptions &&
-      results.httpsOptions.hosts &&
-      results.httpsOptions.hosts.length
-    ) {
-      hosts = results.httpsOptions.hosts;
-      if (!hosts.includes(hostname)) {
-        hosts.push(hostname);
-      }
-    } else {
-      hosts = [hostname];
-    }
-
-    delete results.httpsOptions.hosts;
-    if (self.forceSNI && !hostname.match(/^[\d.]+$/)) {
-      console.debug(`creating SNI context for ${hostname}`);
-      hosts.forEach((host: string) => {
-        self.httpsServer!.addContext(host, results.httpsOptions);
-        self.sslServers[host] = { port: Number(self.httpsPort) };
-      });
-      return callback(null, self.httpsPort);
-    } else {
-      console.debug(`starting server for ${hostname}`);
-      results.httpsOptions.hosts = hosts;
-      try {
-        self._createHttpsServer(
-          results.httpsOptions,
-          (port, httpsServer, wssServer) => {
-            console.debug(`https server started for ${hostname} on ${port}`);
-            const sslServer = {
-              server: httpsServer,
-              wsServer: wssServer,
-              port
-            };
-            hosts.forEach((host: string | number) => {
-              self.sslServers[host] = sslServer;
-            });
-            return callback(null, port);
-          }
-        );
-      } catch (err: any) {
-        return callback(err);
-      }
-    }
-
-    // results: { httpsOptions: SecureContextOptions }
-  }
-  */
-
-  /*
-  async _onHttpServerConnectData(
-    req: http.IncomingMessage,
-    socket: stream.Duplex,
-    head: Buffer
-  ) {
-    const self = this;
-
-    socket.pause();
-
-    
-    // * Detect TLS from first bytes of data
-    // * Inspired from https://gist.github.com/tg-x/835636
-    // * used heuristic:
-    // * - an incoming connection using SSLv3/TLSv1 records should start with 0x16
-    // * - an incoming connection using SSLv2 records should start with the record size
-    // *   and as the first record should not be very big we can expect 0x80 or 0x00 (the MSB is a flag)
-    // * - everything else is considered to be unencrypted
-     
-    if (head[0] == 0x16 || head[0] == 0x80 || head[0] == 0x00) {
-      // URL is in the form 'hostname:port'
-      const hostname = req.url!.split(':', 2)[0];
-
-      const sslServer = this.sslServers[hostname];
-
-      if (sslServer) {
-        return self.makeConnection(req, socket, head, sslServer.port);
-      }
-
-      const wildcardHost = hostname.replace(/[^.]+\./, '*.');
-
-      let sem = self.sslSemaphores[wildcardHost];
-      if (!sem) {
-        sem = self.sslSemaphores[wildcardHost] = semaphore(1);
-      }
-
-      sem.take(() => {
-        if (self.sslServers[hostname]) {
-          process.nextTick(sem.leave.bind(sem));
-          return self.makeConnection(
-            req,
-            socket,
-            head,
-            self.sslServers[hostname].port
-          );
-        }
-
-        if (self.sslServers[wildcardHost]) {
-          process.nextTick(sem.leave.bind(sem));
-          self.sslServers[hostname] = {
-            // @ts-ignore
-            port: self.sslServers[wildcardHost].port
-          };
-          return self.makeConnection(
-            req,
-            socket,
-            head,
-            self.sslServers[hostname].port
-          );
-        }
-
-        getHttpsServer(hostname, (err, port) => {
-          process.nextTick(sem.leave.bind(sem));
-          if (err) {
-            console.error('Error getting HTTPs server');
-            console.error(err);
-            return self._onError('OPEN_HTTPS_SERVER_ERROR', null, err);
-          }
-          return self.makeConnection(req, socket, head, port);
-        });
-
-        delete self.sslSemaphores[wildcardHost];
-      });
-    } else {
-      return self.makeConnection(req, socket, head, this.httpPort);
-    }
-  }
-  */
-
-  /*
-  onCertificateRequired(
-    hostname: string,
-    callback: OnCertificateRequiredCallback
-  ) {
-    const self = this;
-    return callback(null, {
-      keyFile: `${self.sslCaDir}/keys/${hostname}.key`,
-      certFile: `${self.sslCaDir}/certs/${hostname}.pem`,
-      hosts: [hostname]
-    });
-  }
-  */
-
-  /*
-  onCertificateMissing(
-    ctx: ICertficateContext,
-    files: ICertDetails,
-    callback: ErrorCallback
-  ) {
-    const hosts = files.hosts || [ctx.hostname];
-    this.ca.generateServerCertificateKeys(
-      hosts,
-      (certPEM: any, privateKeyPEM: any) => {
-        callback(null, {
-          certFileData: certPEM,
-          keyFileData: privateKeyPEM,
-          hosts
-        });
-      }
-    );
-  }
-  */
-
-  /*
-  _onError(kind: string, ctx: IContext | null, err: Error) {
-    console.error(kind);
-    console.error(err);
-
-    this.onErrorHandlers.forEach((handler) => handler(ctx, err, kind));
-    if (ctx) {
-      ctx.onErrorHandlers.forEach((handler) => handler(ctx, err, kind));
-
-      if (ctx.proxyToClientResponse && !ctx.proxyToClientResponse.headersSent) {
-        ctx.proxyToClientResponse.writeHead(504, 'Proxy Error');
-      }
-      if (ctx.proxyToClientResponse && !ctx.proxyToClientResponse.finished) {
-        ctx.proxyToClientResponse.end(`${kind}: ${err}`, 'utf8');
-      }
-    }
-  }
-  */
-
-  /*
-  _onWebSocketServerConnect(
-    isSSL: boolean,
-    ws: WebSocketType,
-    upgradeReq: IncomingMessage
-  ) {
-    const self = this;
-    // @ts-ignore
-    const socket = ws._socket;
-    const ctx: IWebSocketContext = {
-      uuid: uuid(),
-      proxyToServerWebSocketOptions: undefined,
-      proxyToServerWebSocket: undefined,
-      isSSL,
-      connectRequest:
-        self.connectRequests[`${socket.remotePort}:${socket.localPort}`],
-      clientToProxyWebSocket: ws,
-      onWebSocketConnectionHandlers: [],
-      onWebSocketFrameHandlers: [],
-      onWebSocketCloseHandlers: [],
-      onWebSocketErrorHandlers: [],
-      onWebSocketConnection(fn) {
-        ctx.onWebSocketConnectionHandlers.push(fn);
-        return ctx;
-      },
-      onWebSocketSend(fn) {
-        ctx.onWebSocketFrameHandlers.push(
-          function (
-            ctx: any,
-            type: string,
-            fromServer: any,
-            data: any,
-            flags: any,
-            callback: (arg0: null, arg1: any, arg2: any) => void
-          ) {
-            if (!fromServer && type === 'message') {
-              return this(ctx, data, flags, callback);
-            } else {
-              callback(null, data, flags);
-            }
-          }.bind(fn)
-        );
-        return ctx;
-      },
-      onWebSocketMessage(fn) {
-        ctx.onWebSocketFrameHandlers.push(
-          function (
-            ctx: any,
-            type: string,
-            fromServer: any,
-            data: any,
-            flags: any,
-            callback: (arg0: null, arg1: any, arg2: any) => void
-          ) {
-            if (fromServer && type === 'message') {
-              return this(ctx, data, flags, callback);
-            } else {
-              callback(null, data, flags);
-            }
-          }.bind(fn)
-        );
-        return ctx;
-      },
-      onWebSocketFrame(fn) {
-        ctx.onWebSocketFrameHandlers.push(fn);
-        return ctx;
-      },
-      onWebSocketClose(fn) {
-        ctx.onWebSocketCloseHandlers.push(fn);
-        return ctx;
-      },
-      onWebSocketError(fn) {
-        ctx.onWebSocketErrorHandlers.push(fn);
-        return ctx;
-      },
-      use(mod) {
-        if (mod.onWebSocketConnection) {
-          ctx.onWebSocketConnection(mod.onWebSocketConnection);
-        }
-        if (mod.onWebSocketSend) {
-          ctx.onWebSocketFrame(
-            function (
-              ctx: any,
-              type: string,
-              fromServer: any,
-              data: any,
-              flags: any,
-              callback: (arg0: null, arg1: any, arg2: any) => void
-            ) {
-              if (!fromServer && type === 'message') {
-                return this(ctx, data, flags, callback);
-              } else {
-                callback(null, data, flags);
-              }
-            }.bind(mod.onWebSocketSend)
-          );
-        }
-        if (mod.onWebSocketMessage) {
-          ctx.onWebSocketFrame(
-            function (
-              ctx: any,
-              type: string,
-              fromServer: any,
-              data: any,
-              flags: any,
-              callback: (arg0: null, arg1: any, arg2: any) => void
-            ) {
-              if (fromServer && type === 'message') {
-                return this(ctx, data, flags, callback);
-              } else {
-                callback(null, data, flags);
-              }
-            }.bind(mod.onWebSocketMessage)
-          );
-        }
-        if (mod.onWebSocketFrame) {
-          ctx.onWebSocketFrame(mod.onWebSocketFrame);
-        }
-        if (mod.onWebSocketClose) {
-          ctx.onWebSocketClose(mod.onWebSocketClose);
-        }
-        if (mod.onWebSocketError) {
-          ctx.onWebSocketError(mod.onWebSocketError);
-        }
-        return ctx;
-      }
-    };
-    const clientToProxyWebSocket = ctx.clientToProxyWebSocket!;
-    clientToProxyWebSocket.on(
-      'message',
-      self._onWebSocketFrame.bind(self, ctx, 'message', false)
-    );
-    clientToProxyWebSocket.on(
-      'ping',
-      self._onWebSocketFrame.bind(self, ctx, 'ping', false)
-    );
-    clientToProxyWebSocket.on(
-      'pong',
-      self._onWebSocketFrame.bind(self, ctx, 'pong', false)
-    );
-    clientToProxyWebSocket.on('error', self._onWebSocketError.bind(self, ctx));
-    // @ts-ignore
-    clientToProxyWebSocket._socket.on(
-      'error',
-      self._onWebSocketError.bind(self, ctx)
-    );
-    clientToProxyWebSocket.on(
-      'close',
-      self._onWebSocketClose.bind(self, ctx, false)
-    );
-    // @ts-ignore
-    clientToProxyWebSocket._socket.pause();
-
-    let url;
-    if (upgradeReq.url == '' || /^\//.test(upgradeReq.url!)) {
-      const hostPort = OpsiHTTPProxy.parseHostAndPort(upgradeReq);
-
-      const prefix = ctx.isSSL ? 'wss' : 'ws';
-      const port = hostPort!.port ? ':' + hostPort!.port : '';
-      url = `${prefix}://${hostPort!.host}${port}${upgradeReq.url}`;
-    } else {
-      url = upgradeReq.url;
-    }
-    const proxyToServerHeaders: http_headers_t = {};
-    const clientToProxyHeaders = upgradeReq.headers;
-    for (const header in clientToProxyHeaders) {
-      const header_data = clientToProxyHeaders[header];
-      if (typeof header !== 'string') continue;
-      if (typeof header_data !== 'string') continue;
-      if (header.indexOf('sec-websocket') !== 0) {
-        proxyToServerHeaders[header] = header_data;
-      }
-    }
-
-    let protocols: string[] = [];
-    if (clientToProxyHeaders['sec-websocket-protocol']) {
-      protocols = clientToProxyHeaders['sec-websocket-protocol']
-        .split(',')
-        .map((p) => p.trim());
-    }
-
-    ctx.proxyToServerWebSocketOptions = {
-      url,
-      protocols: protocols.length > 0 ? protocols : undefined,
-      agent: ctx.isSSL ? self.httpsAgent : self.httpAgent,
-      headers: proxyToServerHeaders
-    };
-    function makeProxyToServerWebSocket() {
-      ctx.proxyToServerWebSocket = new WebSocket(
-        ctx.proxyToServerWebSocketOptions!.url!,
-        ctx.proxyToServerWebSocketOptions.protocols,
-        ctx.proxyToServerWebSocketOptions
-      );
-      ctx.proxyToServerWebSocket.on(
-        'message',
-        self._onWebSocketFrame.bind(self, ctx, 'message', true)
-      );
-      ctx.proxyToServerWebSocket.on(
-        'ping',
-        self._onWebSocketFrame.bind(self, ctx, 'ping', true)
-      );
-      ctx.proxyToServerWebSocket.on(
-        'pong',
-        self._onWebSocketFrame.bind(self, ctx, 'pong', true)
-      );
-      ctx.proxyToServerWebSocket.on(
-        'error',
-        self._onWebSocketError.bind(self, ctx)
-      );
-      ctx.proxyToServerWebSocket.on(
-        'close',
-        self._onWebSocketClose.bind(self, ctx, true)
-      );
-      ctx.proxyToServerWebSocket.on('open', () => {
-        // @ts-ignore
-        ctx.proxyToServerWebSocket._socket.on(
-          'error',
-          self._onWebSocketError.bind(self, ctx)
-        );
-        if (clientToProxyWebSocket!.readyState === WebSocket.OPEN) {
-          // @ts-ignore
-          clientToProxyWebSocket._socket.resume();
-        }
-      });
-    }
-
-    return self._onWebSocketConnection(ctx, (err) => {
-      if (err) {
-        return self._onWebSocketError(ctx, err);
-      }
-      return makeProxyToServerWebSocket();
-    });
-  }
-  */
-
-  /*
-  _onHttpServerRequest(
-    isSSL: boolean,
-    clientToProxyRequest: IncomingMessage,
-    proxyToClientResponse: ServerResponse
-  ) {
-    const self = this;
-    const ctx: IContext = {
-      uuid: uuid(),
-      isSSL,
-      serverToProxyResponse: undefined,
-      proxyToServerRequestOptions: undefined,
-      proxyToServerRequest: undefined,
-      connectRequest:
-        self.connectRequests[
-          `${clientToProxyRequest.socket.remotePort}:${clientToProxyRequest.socket.localPort}`
-        ] || undefined,
-      clientToProxyRequest,
-      proxyToClientResponse,
-      onRequestHandlers: [],
-      onErrorHandlers: [],
-      onRequestDataHandlers: [],
-      onResponseHeadersHandlers: [],
-      onRequestHeadersHandlers: [],
-      onRequestEndHandlers: [],
-      onResponseHandlers: [],
-      onResponseDataHandlers: [],
-      onResponseEndHandlers: [],
-      requestFilters: [],
-      responseFilters: [],
-      responseContentPotentiallyModified: false,
-      onRequest(fn) {
-        ctx.onRequestHandlers.push(fn);
-        return ctx;
-      },
-      onError(fn) {
-        ctx.onErrorHandlers.push(fn);
-        return ctx;
-      },
-      onRequestData(fn) {
-        ctx.onRequestDataHandlers.push(fn);
-        return ctx;
-      },
-      onRequestHeaders(fn) {
-        ctx.onRequestHeadersHandlers.push(fn);
-        return ctx;
-      },
-      onResponseHeaders(fn) {
-        ctx.onResponseHeadersHandlers.push(fn);
-        return ctx;
-      },
-      onRequestEnd(fn) {
-        ctx.onRequestEndHandlers.push(fn);
-        return ctx;
-      },
-      addRequestFilter(filter) {
-        ctx.requestFilters.push(filter);
-        return ctx;
-      },
-      onResponse(fn) {
-        ctx.onResponseHandlers.push(fn);
-        return ctx;
-      },
-      onResponseData(fn) {
-        ctx.onResponseDataHandlers.push(fn);
-        ctx.responseContentPotentiallyModified = true;
-        return ctx;
-      },
-      onResponseEnd(fn) {
-        ctx.onResponseEndHandlers.push(fn);
-        return ctx;
-      },
-      addResponseFilter(filter) {
-        ctx.responseFilters.push(filter);
-        ctx.responseContentPotentiallyModified = true;
-        return ctx;
-      },
-      use(mod) {
-        if (mod.onError) {
-          ctx.onError(mod.onError);
-        }
-        if (mod.onRequest) {
-          ctx.onRequest(mod.onRequest);
-        }
-        if (mod.onRequestHeaders) {
-          ctx.onRequestHeaders(mod.onRequestHeaders);
-        }
-        if (mod.onRequestData) {
-          ctx.onRequestData(mod.onRequestData);
-        }
-        if (mod.onResponse) {
-          ctx.onResponse(mod.onResponse);
-        }
-        if (mod.onResponseData) {
-          ctx.onResponseData(mod.onResponseData);
-        }
-        return ctx;
-      }
-    };
-
-    ctx.clientToProxyRequest.on(
-      'error',
-      self._onError.bind(self, 'CLIENT_TO_PROXY_REQUEST_ERROR', ctx)
-    );
-    ctx.proxyToClientResponse.on(
-      'error',
-      self._onError.bind(self, 'PROXY_TO_CLIENT_RESPONSE_ERROR', ctx)
-    );
-    ctx.clientToProxyRequest.pause();
-    const hostPort = OpsiHTTPProxy.parseHostAndPort(
-      ctx.clientToProxyRequest,
-      ctx.isSSL ? 443 : 80
-    );
-    function proxyToServerRequestComplete(
-      serverToProxyResponse: http.IncomingMessage
-    ) {
-      serverToProxyResponse.on(
-        'error',
-        self._onError.bind(self, 'SERVER_TO_PROXY_RESPONSE_ERROR', ctx)
-      );
-      serverToProxyResponse.pause();
-      ctx.serverToProxyResponse = serverToProxyResponse;
-      return self._onResponse(ctx, (err) => {
-        if (err) {
-          return self._onError('ON_RESPONSE_ERROR', ctx, err);
-        }
-        const servToProxyResp = ctx.serverToProxyResponse!;
-
-        if (servToProxyResp.headers['trailer']) {
-          servToProxyResp.headers['transfer-encoding'] = 'chunked';
-        }
-
-        if (
-          self.responseContentPotentiallyModified ||
-          ctx.responseContentPotentiallyModified
-        ) {
-          servToProxyResp.headers['transfer-encoding'] = 'chunked';
-          delete servToProxyResp.headers['content-length'];
-        }
-        if (self.keepAlive) {
-          if (ctx.clientToProxyRequest.headers['proxy-connection']) {
-            servToProxyResp.headers['proxy-connection'] = 'keep-alive';
-            servToProxyResp.headers['connection'] = 'keep-alive';
-          }
-        } else {
-          servToProxyResp.headers['connection'] = 'close';
-        }
-        return self._onResponseHeaders(ctx, (err) => {
-          if (err) {
-            return self._onError('ON_RESPONSEHEADERS_ERROR', ctx, err);
-          }
-          ctx.proxyToClientResponse.writeHead(
-            servToProxyResp!.statusCode!,
-            OpsiHTTPProxy.filterAndCanonizeHeaders(servToProxyResp.headers)
-          );
-          // @ts-ignore
-          ctx.responseFilters.push(new ProxyFinalResponseFilter(self, ctx));
-          let prevResponsePipeElem = servToProxyResp;
-          ctx.responseFilters.forEach((filter) => {
-            filter.on(
-              'error',
-              self._onError.bind(self, 'RESPONSE_FILTER_ERROR', ctx)
-            );
-            prevResponsePipeElem = prevResponsePipeElem.pipe(filter);
-          });
-          return servToProxyResp.resume();
-        });
-      });
-    }
-
-    function makeProxyToServerRequest() {
-      const proto = ctx.isSSL ? https : http;
-      ctx.proxyToServerRequest = proto.request(
-        ctx.proxyToServerRequestOptions!,
-        proxyToServerRequestComplete
-      );
-      ctx.proxyToServerRequest.on(
-        'error',
-        self._onError.bind(self, 'PROXY_TO_SERVER_REQUEST_ERROR', ctx)
-      );
-      ctx.requestFilters.push(new ProxyFinalRequestFilter(self, ctx));
-      let prevRequestPipeElem = ctx.clientToProxyRequest;
-      ctx.requestFilters.forEach((filter) => {
-        filter.on(
-          'error',
-          self._onError.bind(self, 'REQUEST_FILTER_ERROR', ctx)
-        );
-        prevRequestPipeElem = prevRequestPipeElem.pipe(filter);
-      });
-      ctx.clientToProxyRequest.resume();
-    }
-
-    if (hostPort === null) {
-      ctx.clientToProxyRequest.resume();
-      ctx.proxyToClientResponse.writeHead(400, {
-        'Content-Type': 'text/html; charset=utf-8'
-      });
-      ctx.proxyToClientResponse.end('Bad request: Host missing...', 'utf-8');
-    } else {
-      const headers: http_headers_t = {};
-      for (const h in ctx.clientToProxyRequest.headers) {
-        // don't forward proxy-headers
-        if (!/^proxy-/i.test(h)) {
-          const header = ctx.clientToProxyRequest.headers[h];
-          if (typeof header === 'string')
-            if (typeof h === 'string') headers[h] = header;
-        }
-      }
-      if (this.options.forceChunkedRequest) {
-        delete headers['content-length'];
-      }
-
-      ctx.proxyToServerRequestOptions = {
-        method: ctx.clientToProxyRequest.method!,
-        path: ctx.clientToProxyRequest.url!,
-        host: hostPort.host,
-        port: hostPort.port,
-        headers,
-        agent: ctx.isSSL ? self.httpsAgent : self.httpAgent
-      };
-      return self._onRequest(ctx, (err) => {
-        if (err) {
-          return self._onError('ON_REQUEST_ERROR', ctx, err);
-        }
-        return self._onRequestHeaders(ctx, (err: Error | undefined | null) => {
-          if (err) {
-            return self._onError('ON_REQUESTHEADERS_ERROR', ctx, err);
-          }
-          return makeProxyToServerRequest();
-        });
-      });
-    }
-  }
-  */
-
-  /*
-  _onRequestHeaders(ctx: IContext, callback: ErrorCallback) {
-    async.forEach(
-      this.onRequestHeadersHandlers,
-      (fn, callback) => fn(ctx, callback),
-      callback
-    );
-  }
-  */
-
-  /*
-  _onRequest(ctx: IContext, callback: ErrorCallback) {
-    async.forEach(
-      this.onRequestHandlers.concat(ctx.onRequestHandlers),
-      (fn, callback) => fn(ctx, callback),
-      callback
-    );
-  }
-  */
-
-  /*
-  _onWebSocketConnection(ctx: IWebSocketContext, callback: ErrorCallback) {
-    async.forEach(
-      this.onWebSocketConnectionHandlers.concat(
-        ctx.onWebSocketConnectionHandlers
-      ),
-      (fn, callback) => fn(ctx, callback),
-      callback
-    );
-  }
-  */
-
-  /*
-  _onWebSocketFrame(
-    ctx: IWebSocketContext,
-    type: string,
-    fromServer: boolean,
-    data: WebSocket.RawData,
-    flags?: WebSocketFlags | boolean
-  ) {
-    const self = this;
-    async.forEach(
-      this.onWebSocketFrameHandlers.concat(ctx.onWebSocketFrameHandlers),
-      (fn, callback: IWebSocketCallback) =>
-        fn(ctx, type, fromServer, data, flags, (err, newData, newFlags) => {
-          if (err) {
-            return callback(err);
-          }
-          data = newData;
-          flags = newFlags;
-          return callback(null, data, flags);
-        }),
-      (err) => {
-        if (err) {
-          return self._onWebSocketError(ctx, err);
-        }
-        const destWebSocket = fromServer
-          ? ctx.clientToProxyWebSocket!
-          : ctx.proxyToServerWebSocket!;
-        if (destWebSocket.readyState === WebSocket.OPEN) {
-          switch (type) {
-            case 'message':
-              destWebSocket.send(data, { binary: flags as boolean });
-              break;
-            case 'ping':
-              destWebSocket.ping(data, flags as boolean);
-              break;
-            case 'pong':
-              destWebSocket.pong(data, flags as boolean);
-              break;
-          }
-        } else {
-          self._onWebSocketError(
-            ctx,
-            new Error(
-              `Cannot send ${type} because ${
-                fromServer ? 'clientToProxy' : 'proxyToServer'
-              } WebSocket connection state is not OPEN`
-            )
-          );
-        }
-      }
-    );
-  }
-  */
-
-  /*
-  _onWebSocketClose(
-    ctx: IWebSocketContext,
-    closedByServer: boolean,
-    code: number,
-    message: Buffer
-  ) {
-    const self = this;
-    if (!ctx.closedByServer && !ctx.closedByClient) {
-      ctx.closedByServer = closedByServer;
-      ctx.closedByClient = !closedByServer;
-      async.forEach(
-        this.onWebSocketCloseHandlers.concat(ctx.onWebSocketCloseHandlers),
-        (fn, callback) => fn(ctx, code, message, callback),
-        (err) => {
-          if (err) {
-            return self._onWebSocketError(ctx, err);
-          }
-          const clientToProxyWebSocket = ctx.clientToProxyWebSocket!;
-          const proxyToServerWebSocket = ctx.proxyToServerWebSocket!;
-          if (
-            clientToProxyWebSocket.readyState !==
-            proxyToServerWebSocket.readyState
-          ) {
-            try {
-              if (
-                clientToProxyWebSocket.readyState === WebSocket.CLOSED &&
-                proxyToServerWebSocket.readyState === WebSocket.OPEN
-              ) {
-                if (code === 1005) proxyToServerWebSocket.close();
-                else proxyToServerWebSocket.close(code, message);
-              } else if (
-                proxyToServerWebSocket.readyState === WebSocket.CLOSED &&
-                clientToProxyWebSocket.readyState === WebSocket.OPEN
-              ) {
-                if (code === 1005) proxyToServerWebSocket.close();
-                else clientToProxyWebSocket.close(code, message);
-              }
-            } catch (err: any) {
-              return self._onWebSocketError(ctx, err);
-            }
-          }
-        }
-      );
-    }
-  }
-  */
-
-  /*
-  _onWebSocketError(ctx: IWebSocketContext, err: Error) {
-    this.onWebSocketErrorHandlers.forEach((handler) => handler(ctx, err));
-    if (ctx) {
-      ctx.onWebSocketErrorHandlers.forEach((handler) => handler(ctx, err));
-    }
-    const clientToProxyWebSocket = ctx.clientToProxyWebSocket!;
-    const proxyToServerWebSocket = ctx.proxyToServerWebSocket!;
-    if (
-      proxyToServerWebSocket &&
-      clientToProxyWebSocket.readyState !== proxyToServerWebSocket.readyState
-    ) {
-      try {
-        if (
-          clientToProxyWebSocket.readyState === WebSocket.CLOSED &&
-          proxyToServerWebSocket.readyState === WebSocket.OPEN
-        ) {
-          proxyToServerWebSocket.close();
-        } else if (
-          proxyToServerWebSocket.readyState === WebSocket.CLOSED &&
-          clientToProxyWebSocket.readyState === WebSocket.OPEN
-        ) {
-          clientToProxyWebSocket.close();
-        }
-      } catch (err) {
-        // ignore
-      }
-    }
-  }
-  */
-
-  /*
-  _onRequestData(
-    ctx: IContext,
-    chunk: Buffer | undefined,
-    callback: (arg0: null, arg1: any) => void
-  ) {
-    const self = this;
-    async.forEach(
-      this.onRequestDataHandlers.concat(ctx.onRequestDataHandlers),
-      (fn, callback: OnRequestDataCallback) => {
-        if (!Buffer.isBuffer(chunk)) return;
-        fn(ctx, chunk, (err, newChunk) => {
-          if (err) {
-            return callback(err);
-          }
-          chunk = newChunk;
-          return callback(null, newChunk);
-        });
-      },
-      (err) => {
-        if (err) {
-          return self._onError('ON_REQUEST_DATA_ERROR', ctx, err);
-        }
-        return callback(null, chunk);
-      }
-    );
-  }
-  */
-
-  /*
-  _onRequestEnd(ctx: IContext, callback: ErrorCallback) {
-    const self = this;
-    async.forEach(
-      this.onRequestEndHandlers.concat(ctx.onRequestEndHandlers),
-      (fn, callback) => fn(ctx, callback),
-      (err) => {
-        if (err) {
-          return self._onError('ON_REQUEST_END_ERROR', ctx, err);
-        }
-        return callback(null);
-      }
-    );
-  }
-  */
-
-  /*
-  _onResponse(ctx: IContext, callback: ErrorCallback) {
-    async.forEach(
-      this.onResponseHandlers.concat(ctx.onResponseHandlers),
-      (fn, callback) => fn(ctx, callback),
-      callback
-    );
-  }
-  */
-
-  /*
-  _onResponseHeaders(ctx: IContext, callback: ErrorCallback) {
-    async.forEach(
-      this.onResponseHeadersHandlers,
-      (fn, callback) => fn(ctx, callback),
-      callback
-    );
-  }
-  */
-
-  /*
-  _onResponseData(
-    ctx: IContext,
-    chunk: Buffer | undefined,
-    callback: ErrorCallback
-  ) {
-    async.forEach(
-      this.onResponseDataHandlers.concat(ctx.onResponseDataHandlers),
-      (fn, callback: OnRequestDataCallback) => {
-        if (!Buffer.isBuffer(chunk)) return;
-        fn(ctx, chunk, (err, newChunk) => {
-          if (err) {
-            return callback(err);
-          }
-
-          chunk = newChunk;
-          return callback(null, newChunk);
-        });
-      },
-      (err) => {
-        if (err) {
-          return this._onError('ON_RESPONSE_DATA_ERROR', ctx, err);
-        }
-        return callback(null, chunk);
-      }
-    );
-  }
-  */
-
-  /*
-  _onResponseEnd(ctx: IContext, callback: ErrorCallback) {
-    async.forEach(
-      this.onResponseEndHandlers.concat(ctx.onResponseEndHandlers),
-      (fn, callback) => fn(ctx, callback),
-      (err) => {
-        if (err) {
-          return this._onError('ON_RESPONSE_END_ERROR', ctx, err);
-        }
-        return callback(null);
-      }
-    );
-  }
-  */
-
-  static parseHostAndPort(req: http.IncomingMessage, defaultPort?: number) {
-    const m = req.url!.match(/^http:\/\/([^/]+)(.*)/);
-    if (m) {
-      req.url = m[2] || '/';
-      return OpsiHTTPProxy.parseHost(m[1], defaultPort);
-    } else if (req.headers.host) {
-      return OpsiHTTPProxy.parseHost(req.headers.host, defaultPort);
-    } else {
-      return null;
-    }
-  }
-
-  static parseHost(
-    hostString: string,
-    defaultPort?: number
-  ): { host: string; port: number | undefined } {
-    const m = hostString.match(/^http:\/\/(.*)/);
-    if (m) {
-      const parsedUrl = url.parse(hostString);
-      return {
-        host: parsedUrl.hostname as string,
-        port: Number(parsedUrl.port)
-      };
-    }
-
-    const hostPort = hostString.split(':');
-    const host = hostPort[0];
-    const port = hostPort.length === 2 ? +hostPort[1] : defaultPort;
-
-    return {
-      host,
-      port
-    };
-  }
-
-  /*
-  static filterAndCanonizeHeaders(originalHeaders: IncomingHttpHeaders) {
-    const headers: http_headers_t = {};
-    for (const key in originalHeaders) {
-      const canonizedKey = key.trim();
-      if (/^public-key-pins/i.test(canonizedKey)) {
-        // HPKP header => filter
-        continue;
-      }
-      if (typeof canonizedKey === 'string')
-        if (typeof originalHeaders[key] === 'string')
-          headers[canonizedKey] = originalHeaders[key];
-    }
-
-    return headers;
-  }
-  */
 }
 
 export {

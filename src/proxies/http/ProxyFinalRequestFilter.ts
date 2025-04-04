@@ -15,7 +15,7 @@ export class ProxyFinalRequestFilter extends events.EventEmitter {
           return proxy._onError('ON_REQUEST_DATA_ERROR', ctx, err);
         }
         if (chunk) {
-          return ctx.proxyToServerRequest.write(chunk);
+          return ctx.proxy_to_server_request.write(chunk);
         }
       });
       return true;
@@ -32,7 +32,7 @@ export class ProxyFinalRequestFilter extends events.EventEmitter {
             if (err) {
               return proxy._onError('ON_REQUEST_END_ERROR', ctx, err);
             }
-            return ctx.proxyToServerRequest.end(chunk);
+            return ctx.proxy_to_server_request.end(chunk);
           });
         });
       } else {
@@ -40,7 +40,7 @@ export class ProxyFinalRequestFilter extends events.EventEmitter {
           if (err) {
             return proxy._onError('ON_REQUEST_END_ERROR', ctx, err);
           }
-          return ctx.proxyToServerRequest.end(chunk || undefined);
+          return ctx.proxy_to_server_request.end(chunk || undefined);
         });
       }
     };
