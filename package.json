@@ -46,9 +46,10 @@
   "author": "Jason Medeiros",
   "license": "MIT",
   "dependencies": {
-    "@opsimathically/deferred": "^1.0.0",
-    "@opsimathically/iterasync": "^1.0.2",
-    "@opsimathically/randomdatatools": "^1.0.1",
+    "@opsimathically/certificateauthority": "latest",
+    "@opsimathically/deferred": "latest",
+    "@opsimathically/iterasync": "latest",
+    "@opsimathically/randomdatatools": "latest",
     "async": "^3.2.6",
     "deep-equal": "^2.2.3",
     "fast-equals": "^5.2.2",

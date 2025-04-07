@@ -48,6 +48,7 @@ import { v4 as uuid } from 'uuid';
 import { randomGuid } from '@opsimathically/randomdatatools';
 import IterAsync from '@opsimathically/iterasync';
 import { Deferred, DeferredMap } from '@opsimathically/deferred';
+import { CertificateAuthority } from '@opsimathically/certificateauthority';
 
 // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 // %%% node-http-mitm-proxy Imports %%%%%%%%%%%%%%%%%
@@ -200,8 +201,10 @@ type opsiproxy_options_t = {
   httpPort: number;
   // The hostname or local address to listen on.
   host: string;
-  // Path to the certificates cache directory (default: process.cwd() + '/.http-mitm-proxy')
+  // Path to the certificates cache directory
   sslCaDir: string;
+  // for our certificate authority, this is the sqlite cert store file to use
+  cert_store_file: string;
   // enable HTTP persistent connection
   keepAlive: boolean;
   // The number of milliseconds of inactivity before a socket is presumed to have timed out. Defaults to no timeout.
@@ -297,11 +300,14 @@ class OpsiHTTPProxy extends EventEmitter {
   // plugin runner
   plugin_runner: OpsiProxyPluginRunner = new OpsiProxyPluginRunner();
 
-  // certficate authority
+  // certficate authority (old, to remove)
   ca!: ca;
 
   // connection requests
   connect_requests: Record<string, http.IncomingMessage> = {};
+
+  // certificate authority (new)
+  certificate_authority!: CertificateAuthority;
 
   // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
   // %%% Tracking Maps %%%%%%%%%%%%%%%%
@@ -363,8 +369,45 @@ class OpsiHTTPProxy extends EventEmitter {
   }
 
   async start() {
-    // create https proxy server
-    // create http proxy server
+    // set self reference
+    const opsiproxy_ref = this;
+
+    // create and  initialize the certificate authority
+    opsiproxy_ref.certificate_authority = new CertificateAuthority();
+    await opsiproxy_ref.certificate_authority.init({
+      name: 'opsiproxy',
+      description: 'opsiproxy certificate authority',
+      file: opsiproxy_ref.options.cert_store_file,
+      ca_attrs: [
+        {
+          name: 'commonName',
+          value: 'opsiproxy'
+        },
+        {
+          name: 'countryName',
+          value: 'Internet'
+        },
+        {
+          shortName: 'ST',
+          value: 'Internet'
+        },
+        {
+          name: 'localityName',
+          value: 'Internet'
+        },
+        {
+          name: 'organizationName',
+          value: 'opsiproxy'
+        },
+        {
+          shortName: 'OU',
+          value: 'CA'
+        }
+      ]
+    });
+
+    // listen for connections
+    await opsiproxy_ref.listen();
   }
 
   // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -927,7 +970,8 @@ class OpsiHTTPProxy extends EventEmitter {
 
         // NOTE: We need to ensure that we have some head data so that we can
         //       detect if the connection is encrypted or not.  If we don't have
-        //       head data, we need to wait for the client to send some.
+        //       head data, we need to wait for the client to send some.  That's the
+        //       point of the if/else statement below.
 
         // often times, head is unset and we have to wait for data.  This is required
         // for us to be able to detect tls/ssl connections.
@@ -971,6 +1015,8 @@ class OpsiHTTPProxy extends EventEmitter {
           });
 
           client_socket.write('HTTP/1.1 200 OK\r\n');
+          client_socket.write('Proxy-Connection: keep-alive\r\n');
+          client_socket.write('Connection: keep-alive\r\n');
           /*
           if (
             self.keepAlive &&

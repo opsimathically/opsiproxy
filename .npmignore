@@ -5,6 +5,9 @@ src/
 .git/
 .vscode/
 tests/
+test/
+example/
+examples/
 eslint.config.mjs
 tsconfig.json
 .prettierrc

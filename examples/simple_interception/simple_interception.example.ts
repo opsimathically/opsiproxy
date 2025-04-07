@@ -17,7 +17,7 @@ import axios, { AxiosResponse } from 'axios';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import { HttpProxyAgent } from 'http-proxy-agent';
 
-import { OpsiProxySocketContext } from '@src/proxies/http/contexts/OpsiProxySocketContext.class';
+import { OpsiProxySocketContext } from '@src/proxies/http/contexts/socket_context/OpsiProxySocketContext.class';
 
 import {
   OpsiHTTPProxy,
@@ -61,6 +61,11 @@ class TestHttpProxyPlugin implements opsiproxy_plugin_t {
     host: 'localhost',
     httpPort: 8080,
     sslCaDir: path.resolve(__dirname, 'test_ca_dir'),
+    cert_store_file: path.resolve(
+      __dirname,
+      'test_ca_dir',
+      'cert_store.sqlite'
+    ),
     keepAlive: true,
     timeout: 0,
     httpAgent: new http.Agent({ keepAlive: true }),
@@ -71,7 +76,7 @@ class TestHttpProxyPlugin implements opsiproxy_plugin_t {
     plugins: [test_http_proxy_plugin]
   });
 
-  await opsihttpproxy.listen();
+  await opsihttpproxy.start();
 
   // await opsihttpproxy.close();
 })();

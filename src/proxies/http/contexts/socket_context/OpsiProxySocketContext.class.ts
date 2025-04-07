@@ -203,14 +203,14 @@ class OpsiProxySocketContext extends EventEmitter {
   pauseSocket() {
     const ctx_ref = this;
     if (ctx_ref.socketIsPaused()) return false;
-    ctx_ref.socket.pause();
+    ctx_ref.options.socket.pause();
     return true;
   }
 
   resumeSocket() {
     const ctx_ref = this;
     if (!ctx_ref.socketIsPaused()) return false;
-    ctx_ref.socket.resume();
+    ctx_ref.options.socket.resume();
     return true;
   }
 
