@@ -406,6 +406,33 @@ class OpsiHTTPProxy extends EventEmitter {
       ]
     });
 
+    const ca_cert_pem_file = path.join(
+      opsiproxy_ref.options.sslCaDir,
+      'ca_cert.pem'
+    );
+    const ca_private_key_pem_file = path.join(
+      opsiproxy_ref.options.sslCaDir,
+      'ca_private_key.pem'
+    );
+    const ca_public_key_pem_file = path.join(
+      opsiproxy_ref.options.sslCaDir,
+      'ca_public_key.pem'
+    );
+
+    // write certs to disk
+    await fs_promises.writeFile(
+      ca_cert_pem_file,
+      opsiproxy_ref.certificate_authority.ca_loaded_ctx.ca_cert_pem
+    );
+    await fs_promises.writeFile(
+      ca_private_key_pem_file,
+      opsiproxy_ref.certificate_authority.ca_loaded_ctx.ca_private_key_pem
+    );
+    await fs_promises.writeFile(
+      ca_public_key_pem_file,
+      opsiproxy_ref.certificate_authority.ca_loaded_ctx.ca_public_key_pem
+    );
+
     // listen for connections
     await opsiproxy_ref.listen();
   }

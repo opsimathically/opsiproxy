@@ -101,6 +101,11 @@ class OpsiProxyMITMHttpsServer {
         proxy_to_client_response: opsiproxy_http_proxy_to_client_response_message_i
       ) => {
         debugger;
+
+        proxy_to_client_response.writeHead(200, {
+          'Content-Type': 'text/html; charset=utf-8'
+        });
+        proxy_to_client_response.end('MOOOO', 'utf-8');
         /*
           const ctx = (client_to_proxy_request.socket as opsiproxy_socket_i)
             .opsiproxy_socket_ctx;
