@@ -16,6 +16,7 @@ import crytpo from 'crypto';
 import { Deferred } from '@opsimathically/deferred';
 
 import net from 'node:net';
+import tls from 'node:tls';
 
 import {
   OpsiHTTPProxy,
@@ -137,15 +138,13 @@ class OpsiProxyTunnelContext extends EventEmitter {
 
     const opsiproxy_ref = parent_ctx.options.proxy;
 
-    debugger;
-
     // if there is no matching proxy, go ahead and create and register a new one
     if (!http_mitm_proxy) {
       // if this is a https tunnel, we need to create a new mitm server
       if (
         tunnel_ctx_ref?.options?.client_to_proxy?.request?.connect?.encrypted
       ) {
-        debugger;
+        // ----------------------------
 
         const http_mitm_proxy = new OpsiProxyMITMHttpsServer({
           tunnel_ctx: tunnel_ctx_ref,
@@ -156,7 +155,6 @@ class OpsiProxyTunnelContext extends EventEmitter {
         // http_mitm_proxy.addr_info.address;
         // http_mitm_proxy.addr_info.port;
 
-        debugger;
         // start the mitm proxy server
         await http_mitm_proxy.start();
 
@@ -168,6 +166,16 @@ class OpsiProxyTunnelContext extends EventEmitter {
             allowHalfOpen: true
           },
           () => {
+            // Set this connection as well as our contexts onto the mitm proxy
+            // servers relay stack.  This is very important, as it allows us to communicate
+            // information between here, and the remote server.  I think this should work appropriately,
+            // but I'll need to test and make sure.
+            http_mitm_proxy.connect_relay_stack.push({
+              client_to_mitm_proxy_connection: client_to_mitm_proxy_connection,
+              tunnel_ctx: tunnel_ctx_ref,
+              ctx: parent_ctx
+            });
+
             // handle close events on both sockets
             client_to_mitm_proxy_connection.on('close', () => {
               // params.client_socket.destroy();
@@ -203,6 +211,8 @@ class OpsiProxyTunnelContext extends EventEmitter {
               'data',
               tunnel_ctx_ref.options.client_to_proxy.request.head
             );
+
+            // // resume the socket
             client_to_proxy_socket_ctx?.options.socket.resume();
 
             net_connect_deferred.resolve(true);
@@ -229,8 +239,6 @@ class OpsiProxyTunnelContext extends EventEmitter {
     const https_mitm_server = https.createServer(https_server_options);
       */
     }
-
-    debugger;
   }
 
   detectTLSFromRequestHead(head: Buffer) {

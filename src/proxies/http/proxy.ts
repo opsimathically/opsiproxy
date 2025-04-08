@@ -1029,7 +1029,7 @@ class OpsiHTTPProxy extends EventEmitter {
 
             // start the tunnel context processor
             await tunnel_ctx.start();
-            debugger;
+
             /*
             await opsiproxy_ref.handleHTTPsMITMDataStart({
               ctx: ctx,
@@ -1079,8 +1079,6 @@ class OpsiHTTPProxy extends EventEmitter {
 
         // start the tunnel context processor
         await tunnel_ctx.start();
-
-        debugger;
         /*
         await opsiproxy_ref.handleHTTPsMITMDataStart({
           ctx: ctx,

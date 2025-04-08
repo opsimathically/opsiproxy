@@ -9,6 +9,8 @@
  * https server using the certificates/keys.
  */
 
+import net from 'node:net';
+import * as tls from 'tls';
 import http from 'node:http';
 import https from 'node:https';
 import stream from 'node:stream';
@@ -42,6 +44,10 @@ class OpsiProxyMITMHttpsServer {
   listening_port: number = 0;
   addr_info!: AddressInfo;
   https_mitm_server!: https.Server;
+  tls_mitm_server!: tls.Server;
+  net_mitm_server!: net.Server;
+
+  connect_relay_stack: any[] = [];
 
   options: opsiproxy_mitm_https_server_options_t;
   constructor(options: opsiproxy_mitm_https_server_options_t) {
@@ -57,6 +63,7 @@ class OpsiProxyMITMHttpsServer {
 
     // get proxy ref
     const ctx = this.options.tunnel_ctx.options.parent_ctx;
+    const tunnel_ctx = this.options.tunnel_ctx;
     const opsiproxy_ref = ctx.options.proxy;
 
     // generate key and pem set
@@ -65,11 +72,108 @@ class OpsiProxyMITMHttpsServer {
         this.options.hosts
       );
 
+    // ---
+
+    // Prepare TLS options
+    const options = {
+      key: ca_signed_https_pems.private_key_pem,
+      cert: ca_signed_https_pems.cert_pem
+    };
+
+    const tls_server = tls.createServer(options, (socket: tls.TLSSocket) => {
+      const _extra_data = mitmhttps_ref.connect_relay_stack.pop();
+      debugger;
+
+      socket.on('data', (chunk) => {
+        debugger;
+        /*
+          dataBuffer = Buffer.concat([dataBuffer, chunk]);
+      
+          const reqString = dataBuffer.toString();
+          if (reqString.includes('\r\n\r\n')) {
+            console.log('Received HTTPS request:\n', reqString);
+      
+            const response = [
+              'HTTP/1.1 200 OK',
+              'Content-Type: text/plain',
+              'Content-Length: 13',
+              'Connection: close',
+              '',
+              'Hello, world!',
+            ].join('\r\n');
+      
+            socket.write(response);
+            socket.end();
+          }
+        */
+      });
+
+      socket.on('error', (err) => {
+        console.error('TLS socket error:', err);
+      });
+    });
+
+    mitmhttps_ref.tls_mitm_server = tls_server;
+
+    // start the server listening on whatever address is available
+    const listen_deferred: Deferred = new Deferred();
+    mitmhttps_ref.tls_mitm_server.listen(0, () => {
+      // gather port
+      mitmhttps_ref.listening_port = (
+        mitmhttps_ref.tls_mitm_server.address() as AddressInfo
+      ).port;
+      // gather addr info
+      mitmhttps_ref.addr_info =
+        mitmhttps_ref.tls_mitm_server.address() as AddressInfo;
+
+      // resolve
+      listen_deferred.resolve(true);
+    });
+
+    await listen_deferred.promise;
+    // -----
+
+    return true;
+  }
+
+  // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+  // %%% OLD UNUSED %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+  // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+  // start the server
+  async starOld(): Promise<boolean> {
+    const mitmhttps_ref = this;
+
+    // ensure we have a tunnel context
+    if (!mitmhttps_ref?.options?.tunnel_ctx) return false;
+
+    // get proxy ref
+    const ctx = this.options.tunnel_ctx.options.parent_ctx;
+    const tunnel_ctx = this.options.tunnel_ctx;
+    const opsiproxy_ref = ctx.options.proxy;
+
+    // generate key and pem set
+    const ca_signed_https_pems =
+      await opsiproxy_ref.certificate_authority.generateServerCertificateAndKeysPEMSet(
+        this.options.hosts
+      );
+
+    const httpsServer = new https.Server();
+
+    // create server
+    const netServer = net.createServer({
+      /*pauseOnConnect: true,*/
+      blockList: opsiproxy_ref.options.proxy_incomming_block_list
+    });
+
     // create server options
     const https_server_options: https.ServerOptions = {
       key: ca_signed_https_pems.private_key_pem,
       cert: ca_signed_https_pems.cert_pem
     };
+
+    // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+    // %%% OLD OLD OLD
 
     mitmhttps_ref.https_mitm_server = https.createServer(https_server_options);
 
@@ -81,14 +185,14 @@ class OpsiProxyMITMHttpsServer {
       'clientError',
       async (err: Error, socket: opsiproxy_socket_i) => {
         // 'ERR_SSL_TLSV1_ALERT_UNKNOWN_CA'
-        debugger;
+        // debugger;
       }
     );
 
     mitmhttps_ref.https_mitm_server.on(
       'connect',
       (req: http.IncomingMessage, socket: stream.Duplex, head: Buffer) => {
-        debugger;
+        // debugger;
       }
     );
 
@@ -100,12 +204,101 @@ class OpsiProxyMITMHttpsServer {
         client_to_proxy_request: opsiproxy_http_incomming_message_i,
         proxy_to_client_response: opsiproxy_http_proxy_to_client_response_message_i
       ) => {
-        debugger;
+        // WE GET HERE, THIS GOES BACK, HOLY CRAP YAY
 
+        /*
         proxy_to_client_response.writeHead(200, {
           'Content-Type': 'text/html; charset=utf-8'
         });
         proxy_to_client_response.end('MOOOO', 'utf-8');
+        */
+        debugger;
+
+        /*
+        hostname: client_to_proxy_request.host_and_port.host,
+            port: client_to_proxy_request.host_and_port.port,
+            path:
+              ctx.client_to_proxy_request.parsed_request_url.pathname +
+              ctx.client_to_proxy_request.parsed_request_url.search,
+            method: ctx.client_to_proxy_request.method,
+            headers: ctx.client_to_proxy_request.headers
+        */
+
+        // tunnel_ctx.options.client_to_proxy.request.host;
+        // tunnel_ctx.options.client_to_proxy.request.port;
+
+        const proxyReq = https.request(
+          {
+            hostname: 'news.ycombinator.com',
+            port: 443,
+            path: '/',
+            method: 'GET',
+            rejectUnauthorized: false, // <--- Accept self-signed or invalid certs
+            checkServerIdentity: () => undefined
+          },
+          (res) => {
+            debugger;
+            // Write the headers and status from the destination to the client
+            proxy_to_client_response.writeHead(
+              res.statusCode || 500,
+              res.headers
+            );
+            // Pipe the response from target back to the client
+            res.pipe(proxy_to_client_response);
+          }
+        );
+
+        proxyReq.on('error', (err) => {
+          console.error('Proxy request error:', err);
+          proxy_to_client_response.writeHead(502);
+          proxy_to_client_response.end('Bad Gateway');
+        });
+
+        // Pipe the client request body to the destination
+        client_to_proxy_request.pipe(proxyReq);
+        return;
+
+        /*
+
+        // Choose http or https based on protocol
+        const transport =
+          ctx.client_to_proxy_request.parsed_request_url.protocol === 'https:'
+            ? https
+            : http;
+
+        // debugger;
+        const proxyReq = transport.request(
+          {
+            hostname: client_to_proxy_request.host_and_port.host,
+            port: client_to_proxy_request.host_and_port.port,
+            path:
+              ctx.client_to_proxy_request.parsed_request_url.pathname +
+              ctx.client_to_proxy_request.parsed_request_url.search,
+            method: ctx.client_to_proxy_request.method,
+            headers: ctx.client_to_proxy_request.headers
+          },
+          (proxyRes) => {
+            // Write the headers and status from the destination to the client
+            proxy_to_client_response.writeHead(
+              proxyRes.statusCode || 500,
+              proxyRes.headers
+            );
+            // Pipe the response from target back to the client
+            proxyRes.pipe(proxy_to_client_response);
+          }
+        );
+
+        proxyReq.on('error', (err) => {
+          console.error('Proxy request error:', err);
+          proxy_to_client_response.writeHead(502);
+          proxy_to_client_response.end('Bad Gateway');
+        });
+
+        // Pipe the client request body to the destination
+        client_to_proxy_request.pipe(proxyReq);
+        return;
+        */
+
         /*
           const ctx = (client_to_proxy_request.socket as opsiproxy_socket_i)
             .opsiproxy_socket_ctx;
@@ -209,7 +402,6 @@ class OpsiProxyMITMHttpsServer {
     );
     await listen_deferred.promise;
 
-    debugger;
     // return indicating that the mitm is in place
     return true;
     /*
