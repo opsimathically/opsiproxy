@@ -33,7 +33,7 @@ import {
 import { OpsiProxyMITMHttpsServer } from '@src/proxies/http/mitm_servers/https/OpsiProxyMITMHttpsServer.class';
 
 import { OpsiProxySocketContext } from '@src/proxies/http/contexts/socket_context/OpsiProxySocketContext.class';
-import { EventEmitter } from 'stream';
+import { PassThrough, Duplex, EventEmitter } from 'node:stream';
 
 /*
 type opsiproxy_net_context_options_t = {
@@ -145,6 +145,110 @@ class OpsiProxyTunnelContext extends EventEmitter {
         tunnel_ctx_ref?.options?.client_to_proxy?.request?.connect?.encrypted
       ) {
         // ----------------------------
+
+        // generate key and pem set
+        const ca_signed_https_pems =
+          await opsiproxy_ref.certificate_authority.generateServerCertificateAndKeysPEMSet(
+            [host]
+          );
+
+        // TLS options
+        const secureContext = tls.createSecureContext({
+          cert: ca_signed_https_pems.cert_pem,
+          key: ca_signed_https_pems.private_key_pem
+        });
+
+        // Prepare TLS options
+        const options = {
+          // isServer: true,
+          key: ca_signed_https_pems.private_key_pem,
+          cert: ca_signed_https_pems.cert_pem
+        };
+
+        // Now create a duplex stream to inject the head first, then forward rest
+        let head_has_been_sent = false;
+        const fakeDuplex = new Duplex({
+          read(size: number) {
+            // debugger;
+            if (head_has_been_sent === true) {
+              return;
+            }
+            head_has_been_sent = true;
+            this.push(tunnel_ctx_ref.options.client_to_proxy.request.head);
+            // client_to_proxy_socket_ctx.options.socket.pipe(this); // stream the rest after head
+          },
+          write(chunk, encoding, callback) {
+            debugger;
+            client_to_proxy_socket_ctx.options.socket.write(
+              chunk,
+              encoding,
+              callback
+            ); // TLS writes go to raw socket
+          },
+          final(callback) {
+            debugger;
+            client_to_proxy_socket_ctx.options.socket.end();
+            callback();
+          }
+        });
+
+        /*
+        const tls_server = tls.createServer(options);
+
+        // wait for secure connection
+        tls_server.on('secureConnection', async (tlssocket: tls.TLSSocket) => {
+          tlssocket.on('data', (data: Buffer) => {
+            debugger;
+          });
+          debugger;
+        });
+
+        tls_server.emit(
+          'secureConnection',
+          new tls.TLSSocket(client_to_proxy_socket_ctx?.options.socket, options)
+        );
+        */
+
+        if (!client_to_proxy_socket_ctx.options.socket) {
+          debugger;
+          return;
+        }
+
+        // debugger;
+
+        const tls_socket = new tls.TLSSocket(fakeDuplex, options);
+
+        // push the head data
+        // tls_socket.push(tunnel_ctx_ref.options.client_to_proxy.request.head);
+
+        tls_socket.on('secureConnect', () => {
+          debugger;
+        });
+
+        tls_socket.on('data', (data: Buffer) => {
+          debugger;
+        });
+
+        tls_socket.on('error', (err) => {
+          debugger;
+        });
+
+        // emit data to the client socket
+        /*
+        tls_socket.emit(
+          'data',
+          tunnel_ctx_ref.options.client_to_proxy.request.head
+        );
+        */
+
+        // tls_socket.pipe(client_to_proxy_socket_ctx.options.socket);
+
+        // new tls.TLSSocket(client_to_proxy_socket_ctx?.options.socket, options);
+        // // resume the socket
+        client_to_proxy_socket_ctx.options.socket.resume();
+
+        debugger;
+        return;
 
         const http_mitm_proxy = new OpsiProxyMITMHttpsServer({
           tunnel_ctx: tunnel_ctx_ref,

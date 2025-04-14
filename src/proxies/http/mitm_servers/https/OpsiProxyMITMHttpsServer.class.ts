@@ -14,6 +14,7 @@ import * as tls from 'tls';
 import http from 'node:http';
 import https from 'node:https';
 import stream from 'node:stream';
+import * as stream_promises from 'node:stream/promises';
 
 import { WebSocketServer } from 'ws';
 
@@ -43,9 +44,12 @@ type opsiproxy_mitm_https_server_options_t = {
 class OpsiProxyMITMHttpsServer {
   listening_port: number = 0;
   addr_info!: AddressInfo;
+
   https_mitm_server!: https.Server;
-  tls_mitm_server!: tls.Server;
   net_mitm_server!: net.Server;
+
+  http_mitm_server!: http.Server;
+  tls_mitm_server!: tls.Server;
 
   connect_relay_stack: any[] = [];
 
@@ -66,6 +70,34 @@ class OpsiProxyMITMHttpsServer {
     const tunnel_ctx = this.options.tunnel_ctx;
     const opsiproxy_ref = ctx.options.proxy;
 
+    // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+    // %%% Step 0: Create DuplexStream %%%%%%%%%%%%%%%%%
+    // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+    // We first create a duplex stream, this will allow us
+    // to mitm the decoded TLS connection.
+
+    // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+    // %%% Step 1: Create HTTP Server %%%%%%%%%%%%%%%%%%
+    // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+    // http_mitm_server!: http.Server;
+    // tls_mitm_server!: tls.Server;
+    const httpHandler = (
+      req: http.IncomingMessage,
+      res: http.ServerResponse
+    ) => {
+      console.log('HTTP request received:', req.method, req.url);
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.end('Hello from inside TLS tunnel\n');
+    };
+
+    const httpServer = http.createServer(httpHandler);
+
+    // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+    // %%% Step 2: Create TLS Server %%%%%%%%%%%%%%%%%%%
+    // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
     // generate key and pem set
     const ca_signed_https_pems =
       await opsiproxy_ref.certificate_authority.generateServerCertificateAndKeysPEMSet(
@@ -80,13 +112,47 @@ class OpsiProxyMITMHttpsServer {
       cert: ca_signed_https_pems.cert_pem
     };
 
-    const tls_server = tls.createServer(options, (socket: tls.TLSSocket) => {
-      const _extra_data = mitmhttps_ref.connect_relay_stack.pop();
+    const tls_server = tls.createServer(options);
+
+    async function* readTLSSocket(socket: any) {
+      let buffer = Buffer.alloc(0);
+      const readHandler = (data: Buffer) => {
+        debugger;
+        buffer = Buffer.concat([buffer, data]);
+      };
+      debugger;
+      socket.on('data', readHandler);
+      socket.on('end', () => {
+        socket.off('data', readHandler);
+      });
+
+      while (!socket.destroyed || buffer.length > 0) {
+        if (buffer.length > 0) {
+          const data = buffer;
+          buffer = Buffer.alloc(0);
+          debugger;
+          yield data;
+        } else {
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+      }
+    }
+
+    tls_server.on('secureConnection', async (socket: tls.TLSSocket) => {
+      // get the oldest available
+      const _extra_data = mitmhttps_ref.connect_relay_stack.shift();
+
+      httpServer.emit('connection', socket);
+
+      return;
       debugger;
 
+      // Step 1:
+
+      /*
       socket.on('data', (chunk) => {
         debugger;
-        /*
+     
           dataBuffer = Buffer.concat([dataBuffer, chunk]);
       
           const reqString = dataBuffer.toString();
@@ -105,12 +171,20 @@ class OpsiProxyMITMHttpsServer {
             socket.write(response);
             socket.end();
           }
-        */
+     
       });
+      */
 
       socket.on('error', (err) => {
         console.error('TLS socket error:', err);
       });
+
+      // start the async reader
+      const reader = readTLSSocket(socket);
+
+      for await (const data of reader) {
+        debugger;
+      }
     });
 
     mitmhttps_ref.tls_mitm_server = tls_server;
